@@ -121,8 +121,13 @@ def link_stream_source(tmdb_id: int, season_num: int, episode_num: int, gdrive_f
         "resolution": "1080p"
     }
 
-    res = supabase.table("media_sources").insert(source_payload).execute()
-    print(f"[+] Mídia associada: Episódio {episode_num} -> GDrive ID {gdrive_file_id}")
+    existing = supabase.table("media_sources").select("id").eq("episode_id", episode.data["id"]).execute()
+    if existing.data:
+        res = supabase.table("media_sources").update(source_payload).eq("id", existing.data[0]["id"]).execute()
+        print(f"[+] Mídia atualizada (sem duplicata): Episódio {episode_num} -> GDrive ID {gdrive_file_id}")
+    else:
+        res = supabase.table("media_sources").insert(source_payload).execute()
+        print(f"[+] Mídia associada: Episódio {episode_num} -> GDrive ID {gdrive_file_id}")
     return res.data
 
 def main():

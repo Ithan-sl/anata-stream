@@ -575,7 +575,7 @@ async function handleStreamProxy(gdriveId, request) {
   const responseHeaders = new Headers();
   responseHeaders.set("Access-Control-Allow-Origin", "*");
   responseHeaders.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
-  responseHeaders.set("Access-Control-Allow-Headers": "Range, Content-Type, Accept-Ranges");
+  responseHeaders.set("Access-Control-Allow-Headers", "Range, Content-Type, Accept-Ranges");
   responseHeaders.set("Content-Type", "video/mp4");
   responseHeaders.set("Content-Disposition", "inline");
 
