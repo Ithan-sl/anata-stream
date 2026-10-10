@@ -1,9 +1,11 @@
 /**
- * Cloudflare Worker: Anata Stream Portal com JW Player & Google Drive Stream Proxy
- * Correção do Erro 102630:
- *  - Declaração explícita do mime-type type: "video/mp4" no JW Player
- *  - URL terminada em /video.mp4 para identificação imediata do container de vídeo
- *  - Cabeçalho Content-Disposition forçado para "inline" (evita que o navegador force download)
+ * Cloudflare Worker: Anata Stream Portal com ArtPlayer (Anime Mobile-First Engine)
+ * Substitui JW Player (que gerava Erro 100011 por exigir chave de licença paga)
+ * Recursos do ArtPlayer:
+ *  - 100% Open-Source (sem chaves, sem travas de domínio, sem erros de licença)
+ *  - Controles Mobile: Segurar para 2x (como YouTube), toque duplo para pausar, gestos de volume/brilho
+ *  - Suporte completo a MP4 e Google Drive stream com Range HTTP
+ *  - PiP, AirPlay, Tela cheia nativa em celulares (orientação automática)
  */
 
 export default {
@@ -21,7 +23,7 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // 1. Interface Web Principal
+    // 1. Interface Web Principal (SPA)
     if (path === "/" || path === "/index.html") {
       return handleFrontend(url.origin);
     }
@@ -43,9 +45,8 @@ export default {
       return handleAnimeDetails(tmdbId, env, corsHeaders);
     }
 
-    // 5. Proxy de Streaming com suporte a Range & Bypass de Vírus
+    // 5. Proxy de Streaming com suporte a Range & Bypass de Vírus do Google Drive
     if (path.startsWith("/stream/")) {
-      // Suporta tanto /stream/:id quanto /stream/:id/video.mp4
       const gdriveId = path.split("/")[2];
       return handleStreamProxy(gdriveId, request);
     }
@@ -54,7 +55,7 @@ export default {
   }
 };
 
-/* ================= FRONTEND WEB COM JW PLAYER ================= */
+/* ================= FRONTEND WEB COM ARTPLAYER ================= */
 function handleFrontend(origin) {
   const html = `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -62,8 +63,8 @@ function handleFrontend(origin) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Anata Stream — Anime Portal</title>
-  <!-- JW Player 8 Core & Skin -->
-  <script src="https://ssl.p.jwpcdn.com/player/v/8.26.2/jwplayer.js"></script>
+  <!-- ArtPlayer Engine (Livre de licença, otimizado para animes e mobile) -->
+  <script src="https://cdn.jsdelivr.net/npm/artplayer/dist/artplayer.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
     :root {
@@ -254,8 +255,9 @@ function handleFrontend(origin) {
       border-radius: 8px;
       overflow: hidden;
       margin-bottom: 1.25rem;
+      position: relative;
     }
-    #jwplayer-container { width: 100%; height: 100%; }
+    #artplayer-container { width: 100%; height: 100%; }
     .season-tabs {
       display: flex;
       gap: 0.5rem;
@@ -320,7 +322,7 @@ function handleFrontend(origin) {
       <button class="close-btn" onclick="closeModal()">✕</button>
       
       <div class="player-area">
-        <div id="jwplayer-container"></div>
+        <div id="artplayer-container"></div>
       </div>
 
       <h2 id="modalAnimeTitle" style="margin-bottom: 0.4rem; font-size: 1.2rem;">Anime</h2>
@@ -332,36 +334,44 @@ function handleFrontend(origin) {
   </div>
 
   <script>
-    let playerInstance = null;
+    let artInstance = null;
     let activeAnimeData = null;
 
-    function initJWPlayer(streamUrl, title) {
-      const playlistItem = {
-        title: title,
-        sources: [{
-          file: streamUrl,
-          type: "video/mp4"
-        }]
-      };
-
-      if (!playerInstance) {
-        playerInstance = jwplayer("jwplayer-container").setup({
-          playlist: [playlistItem],
-          width: "100%",
-          height: "100%",
-          autostart: true,
-          preload: "auto",
-          controls: true,
-          playbackRateControls: [0.75, 1, 1.25, 1.5, 2],
-          skin: {
-            controlbar: { iconsActive: "#e11d48" },
-            timeslider: { progress: "#e11d48" }
-          }
-        });
-      } else {
-        playerInstance.load([playlistItem]);
-        playerInstance.play();
+    function initArtPlayer(streamUrl, title) {
+      if (artInstance) {
+        artInstance.switchUrl(streamUrl, title);
+        artInstance.play();
+        return;
       }
+
+      artInstance = new Artplayer({
+        container: '#artplayer-container',
+        url: streamUrl,
+        title: title,
+        type: 'mp4',
+        volume: 0.8,
+        isLive: false,
+        muted: false,
+        autoplay: true,
+        pip: true,
+        autoSize: true,
+        autoMini: false,
+        screenshot: true,
+        setting: true,
+        loop: false,
+        flip: true,
+        playbackRate: true,
+        aspectRatio: true,
+        fullscreen: true,
+        fullscreenWeb: true,
+        playsInline: true,
+        airplay: true,
+        fastForward: true, // Segurar na tela do celular para avançar em 2x
+        theme: '#e11d48',
+        icons: {
+          loading: '<span style="color:#e11d48;font-weight:bold;">Carregando vídeo...</span>'
+        }
+      });
     }
 
     async function loadCatalog() {
@@ -454,6 +464,7 @@ function handleFrontend(origin) {
         epList.appendChild(epCard);
       });
 
+      // Toca o primeiro disponível
       const firstAvailable = eps.find(e => e.media_sources && e.media_sources.length > 0);
       if (firstAvailable) {
         playEpisode(firstAvailable, season);
@@ -462,16 +473,15 @@ function handleFrontend(origin) {
 
     function playEpisode(ep, season) {
       const source = ep.media_sources[0];
-      // Adiciona /video.mp4 no final da rota para garantir compatibilidade
       const streamUrl = '/stream/' + source.gdrive_file_id + '/video.mp4';
       const title = 'T' + season.season_number + 'E' + ep.episode_number + ' - ' + (ep.name || '');
       document.getElementById('modalEpisodeTitle').innerText = title;
-      initJWPlayer(streamUrl, title);
+      initArtPlayer(streamUrl, title);
     }
 
     function closeModal() {
-      if (playerInstance) {
-        playerInstance.stop();
+      if (artInstance) {
+        artInstance.pause();
       }
       document.getElementById('playerModal').classList.remove('active');
     }
@@ -552,7 +562,6 @@ async function handleAnimeDetails(tmdbId, env, corsHeaders) {
 /* ================= PROXY DE STREAMING GOOGLE DRIVE COM RANGE & BYPASS DE VÍRUS ================= */
 
 async function handleStreamProxy(gdriveId, request) {
-  // Limpa sufixo se vier como /stream/:id/video.mp4
   const cleanId = gdriveId.replace(/\.mp4$/i, "").split("/")[0];
   const targetUrl = `https://drive.usercontent.google.com/download?id=${cleanId}&export=download&confirm=t`;
 
