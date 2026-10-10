@@ -1,10 +1,9 @@
 /**
  * Cloudflare Worker: Anata Stream Portal com JW Player & Google Drive Stream Proxy
- * Recursos:
- *  - Player JW Player 8 mobile-first com aceleração por hardware e seek avançado
- *  - Proxy de streaming direto do Google Drive com bypass de aviso de vírus (&confirm=t)
- *  - Suporte completo a cabeçalhos RFC 7233 (Range: bytes=) para avanço/retrocesso instantâneo
- *  - Busca em tempo real e catálogo de animes
+ * Correção do Erro 102630:
+ *  - Declaração explícita do mime-type type: "video/mp4" no JW Player
+ *  - URL terminada em /video.mp4 para identificação imediata do container de vídeo
+ *  - Cabeçalho Content-Disposition forçado para "inline" (evita que o navegador force download)
  */
 
 export default {
@@ -44,8 +43,9 @@ export default {
       return handleAnimeDetails(tmdbId, env, corsHeaders);
     }
 
-    // 5. Proxy de Streaming Google Drive com bypass de vírus e Range HTTP
+    // 5. Proxy de Streaming com suporte a Range & Bypass de Vírus
     if (path.startsWith("/stream/")) {
+      // Suporta tanto /stream/:id quanto /stream/:id/video.mp4
       const gdriveId = path.split("/")[2];
       return handleStreamProxy(gdriveId, request);
     }
@@ -61,7 +61,7 @@ function handleFrontend(origin) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Anata Stream — JW Player Anime Portal</title>
+  <title>Anata Stream — Anime Portal</title>
   <!-- JW Player 8 Core & Skin -->
   <script src="https://ssl.p.jwpcdn.com/player/v/8.26.2/jwplayer.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -336,10 +336,17 @@ function handleFrontend(origin) {
     let activeAnimeData = null;
 
     function initJWPlayer(streamUrl, title) {
+      const playlistItem = {
+        title: title,
+        sources: [{
+          file: streamUrl,
+          type: "video/mp4"
+        }]
+      };
+
       if (!playerInstance) {
         playerInstance = jwplayer("jwplayer-container").setup({
-          file: streamUrl,
-          title: title,
+          playlist: [playlistItem],
           width: "100%",
           height: "100%",
           autostart: true,
@@ -352,7 +359,7 @@ function handleFrontend(origin) {
           }
         });
       } else {
-        playerInstance.load([{ file: streamUrl, title: title }]);
+        playerInstance.load([playlistItem]);
         playerInstance.play();
       }
     }
@@ -447,7 +454,6 @@ function handleFrontend(origin) {
         epList.appendChild(epCard);
       });
 
-      // Toca o primeiro disponível
       const firstAvailable = eps.find(e => e.media_sources && e.media_sources.length > 0);
       if (firstAvailable) {
         playEpisode(firstAvailable, season);
@@ -456,7 +462,8 @@ function handleFrontend(origin) {
 
     function playEpisode(ep, season) {
       const source = ep.media_sources[0];
-      const streamUrl = '/stream/' + source.gdrive_file_id;
+      // Adiciona /video.mp4 no final da rota para garantir compatibilidade
+      const streamUrl = '/stream/' + source.gdrive_file_id + '/video.mp4';
       const title = 'T' + season.season_number + 'E' + ep.episode_number + ' - ' + (ep.name || '');
       document.getElementById('modalEpisodeTitle').innerText = title;
       initJWPlayer(streamUrl, title);
@@ -545,8 +552,9 @@ async function handleAnimeDetails(tmdbId, env, corsHeaders) {
 /* ================= PROXY DE STREAMING GOOGLE DRIVE COM RANGE & BYPASS DE VÍRUS ================= */
 
 async function handleStreamProxy(gdriveId, request) {
-  // O link com &confirm=t desvia do aviso de verificação de vírus para arquivos >100MB
-  const targetUrl = `https://drive.usercontent.google.com/download?id=${gdriveId}&export=download&confirm=t`;
+  // Limpa sufixo se vier como /stream/:id/video.mp4
+  const cleanId = gdriveId.replace(/\.mp4$/i, "").split("/")[0];
+  const targetUrl = `https://drive.usercontent.google.com/download?id=${cleanId}&export=download&confirm=t`;
 
   const clientRange = request.headers.get("Range");
   const fetchHeaders = new Headers({
@@ -567,9 +575,10 @@ async function handleStreamProxy(gdriveId, request) {
   const responseHeaders = new Headers();
   responseHeaders.set("Access-Control-Allow-Origin", "*");
   responseHeaders.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
-  responseHeaders.set("Access-Control-Allow-Headers", "Range");
-  responseHeaders.set("Content-Type", driveRes.headers.get("Content-Type") || "video/mp4");
-  
+  responseHeaders.set("Access-Control-Allow-Headers": "Range, Content-Type, Accept-Ranges");
+  responseHeaders.set("Content-Type", "video/mp4");
+  responseHeaders.set("Content-Disposition", "inline");
+
   if (driveRes.headers.has("Content-Length")) {
     responseHeaders.set("Content-Length", driveRes.headers.get("Content-Length"));
   }
