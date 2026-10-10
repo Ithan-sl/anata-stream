@@ -31,10 +31,12 @@ jobs:
       - name: Install Dependencies
         run: pip install requests
 
-      - name: Run Harvester in GitHub Cloud
+      - name: Run Harvester in GitHub Cloud (Intelligent Gap Detection)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          echo "[*] Iniciando rastreamento 100% na nuvem sem precisar do PC ligado..."
+          echo "[*] Iniciando rastreador inteligente com detecção de lacunas..."
           python3 smartplay_harvester.py ${{ inputs.start_page }} ${{ inputs.max_pages }}
