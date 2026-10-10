@@ -1,0 +1,40 @@
+name: Cloud Anime Harvester
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_page:
+        description: 'Página inicial do catálogo'
+        required: true
+        default: '1'
+      max_pages:
+        description: 'Quantas páginas varrer'
+        required: true
+        default: '3'
+
+concurrency:
+  group: cloud-harvester
+  cancel-in-progress: false
+
+jobs:
+  harvest_cloud:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: pip install requests
+
+      - name: Run Harvester in GitHub Cloud
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+        run: |
+          echo "[*] Iniciando rastreamento 100% na nuvem sem precisar do PC ligado..."
+          python3 smartplay_harvester.py ${{ inputs.start_page }} ${{ inputs.max_pages }}

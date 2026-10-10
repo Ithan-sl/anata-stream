@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       stream_url:
-        description: 'URL remota do stream de vídeo capturado'
+        description: 'URL remota do stream de vídeo'
         required: true
       tmdb_id:
         description: 'ID numérico do TMDB'
@@ -17,8 +17,13 @@ on:
         description: 'Número do Episódio'
         required: true
       title_slug:
-        description: 'Identificador do arquivo (ex: jujutsu-kaisen-s01e01)'
+        description: 'Identificador do arquivo (ex: toaru-s01e01)'
         required: true
+
+# Limita a 3 jobs concorrentes para não estourar o limite de conexões do GitHub e Rclone
+concurrency:
+  group: ingest-queue
+  cancel-in-progress: false
 
 jobs:
   ingest_and_sync:
@@ -30,7 +35,7 @@ jobs:
       - name: Install Runtime Tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg rclone curl
+          sudo apt-get install -y ffmpeg rclone curl python3-pip
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -48,7 +53,19 @@ jobs:
           mkdir -p ~/.config/rclone
           echo "$RCLONE_CONF_B64" | base64 -d > ~/.config/rclone/rclone.conf
 
-      - name: Remux Direct Stream (Fast copy without re-encoding)
+      - name: Check Storage Limit (Max 4TB Guardrail)
+        run: |
+          echo "[*] Verificando espaço ocupado no Google Drive..."
+          # Obtém bytes totais usados na pasta Animes
+          BYTES_USED=$(rclone size "gdrive:Animes" --json | jq '.bytes // 0')
+          MAX_BYTES=$((4 * 1024 * 1024 * 1024 * 1024)) # 4TB
+          echo "Bytes usados: $BYTES_USED / Limite: $MAX_BYTES"
+          if [ "$BYTES_USED" -ge "$MAX_BYTES" ]; then
+            echo "[-] ATENÇÃO: Limite de 4TB atingido no Google Drive. Abortando upload."
+            exit 1
+          fi
+
+      - name: Remux Direct Stream (Instant Copy)
         run: |
           FILE_NAME="${{ inputs.title_slug }}.mp4"
           echo "[*] Baixando e remuxando stream com streamcopy (-c copy)..."
@@ -61,20 +78,23 @@ jobs:
           echo "FILE_BYTES=$FILE_BYTES" >> $GITHUB_ENV
           echo "FILE_NAME=$FILE_NAME" >> $GITHUB_ENV
 
-      - name: Upload to Google Drive (5TB)
+      - name: Upload to Google Drive & Enable Public Link Sharing
         run: |
-          REMOTE_DIR="gdrive:Animes/${{ inputs.tmdb_id }}/Season_${{ inputs.season_number }}"
-          echo "[*] Enviando via Rclone para $REMOTE_DIR..."
-          rclone copy "$FILE_NAME" "$REMOTE_DIR" --drive-chunk-size 64M --transfers 4 -v
+          DEST_DIR="gdrive:Animes/${{ inputs.tmdb_id }}/Season_${{ inputs.season_number }}"
+          echo "[*] Enviando via Rclone para $DEST_DIR..."
+          rclone copy "$FILE_NAME" "$DEST_DIR" --drive-chunk-size 64M --transfers 4 -v
 
-          # Extrai o File ID único do arquivo enviado
-          GDRIVE_FILE_ID=$(rclone lsf "$REMOTE_DIR" --format "i" --files-only --filter "+ $FILE_NAME" | head -n 1)
+          # Extrai o File ID do Google Drive
+          GDRIVE_FILE_ID=$(rclone lsf "$DEST_DIR" --format "i" --files-only --filter "+ $FILE_NAME" | head -n 1)
           if [ -z "$GDRIVE_FILE_ID" ]; then
             echo "[-] Erro: Falha ao obter ID do arquivo no Google Drive."
             exit 1
           fi
           echo "GDRIVE_FILE_ID=$GDRIVE_FILE_ID" >> $GITHUB_ENV
-          echo "[+] Upload concluído com sucesso. ID: $GDRIVE_FILE_ID"
+
+          # Garante que o link de compartilhamento seja liberado para streaming direto
+          rclone link "$DEST_DIR/$FILE_NAME" || true
+          echo "[+] Upload concluído e compartilhado com sucesso. ID: $GDRIVE_FILE_ID"
 
       - name: Sync TMDB Metadata and Link Stream in Supabase
         env:

@@ -1,11 +1,10 @@
 /**
- * Cloudflare Worker: Portal Completo de Streaming e Pesquisa de Animes
+ * Cloudflare Worker: Anata Stream Portal com JW Player & Google Drive Stream Proxy
  * Recursos:
- *  - Interface Web (SPA) responsiva estilo Netflix/Crunchyroll
- *  - Busca em tempo real por título no catálogo
- *  - Seletor organizado por Temporadas e Episódios
- *  - Player moderno (Plyr) com busca rápida (Seek / RFC 7233 Range)
- *  - Proxy de streaming do Google Drive
+ *  - Player JW Player 8 mobile-first com aceleração por hardware e seek avançado
+ *  - Proxy de streaming direto do Google Drive com bypass de aviso de vírus (&confirm=t)
+ *  - Suporte completo a cabeçalhos RFC 7233 (Range: bytes=) para avanço/retrocesso instantâneo
+ *  - Busca em tempo real e catálogo de animes
  */
 
 export default {
@@ -23,72 +22,73 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // 1. Interface Web Principal (Home / Catálogo / Player)
+    // 1. Interface Web Principal
     if (path === "/" || path === "/index.html") {
       return handleFrontend(url.origin);
     }
 
-    // 2. API de Catálogo Inicial (Últimos Animes Atualizados)
+    // 2. Catálogo Inicial
     if (path === "/api/catalog") {
       return handleCatalog(env, corsHeaders);
     }
 
-    // 3. API de Busca
+    // 3. Busca de Animes
     if (path.startsWith("/api/search")) {
       const query = url.searchParams.get("q") || "";
       return handleSearch(query, env, corsHeaders);
     }
 
-    // 4. API de Detalhes do Anime e Episódios Estruturados
+    // 4. Detalhes do Anime e Episódios
     if (path.startsWith("/api/anime/")) {
       const tmdbId = path.split("/")[3];
       return handleAnimeDetails(tmdbId, env, corsHeaders);
     }
 
-    // 5. Proxy de Streaming com suporte a Range (Seek rápido)
+    // 5. Proxy de Streaming Google Drive com bypass de vírus e Range HTTP
     if (path.startsWith("/stream/")) {
       const gdriveId = path.split("/")[2];
-      return handleStreamProxy(gdriveId, request, env);
+      return handleStreamProxy(gdriveId, request);
     }
 
     return new Response("Not Found", { status: 404 });
   }
 };
 
-/* ================= FRONTEND WEB COMPLETO (SPA) ================= */
+/* ================= FRONTEND WEB COM JW PLAYER ================= */
 function handleFrontend(origin) {
   const html = `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Anata Stream — Catálogo de Animes</title>
-  <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Anata Stream — JW Player Anime Portal</title>
+  <!-- JW Player 8 Core & Skin -->
+  <script src="https://ssl.p.jwpcdn.com/player/v/8.26.2/jwplayer.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #090a0f;
-      --card-bg: #13151f;
-      --card-hover: #1c1f2e;
-      --accent: #6366f1;
-      --accent-hover: #4f46e5;
+      --bg: #07080c;
+      --card-bg: #11131c;
+      --card-hover: #181b29;
+      --accent: #e11d48;
+      --accent-glow: rgba(225, 29, 72, 0.35);
       --text: #f8fafc;
       --text-muted: #94a3b8;
-      --border: #232738;
+      --border: #1e2235;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
     body {
       background-color: var(--bg);
       color: var(--text);
-      font-family: 'Inter', sans-serif;
+      font-family: 'Plus Jakarta Sans', sans-serif;
       min-height: 100vh;
       display: flex;
       flex-direction: column;
     }
     header {
-      padding: 1.25rem 2rem;
-      background: rgba(9, 10, 15, 0.85);
-      backdrop-filter: blur(12px);
+      padding: 1rem 1.5rem;
+      background: rgba(7, 8, 12, 0.9);
+      backdrop-filter: blur(16px);
       border-bottom: 1px solid var(--border);
       position: sticky;
       top: 0;
@@ -99,23 +99,23 @@ function handleFrontend(origin) {
       gap: 1rem;
     }
     .logo {
-      font-size: 1.4rem;
+      font-size: 1.35rem;
       font-weight: 800;
-      letter-spacing: -0.5px;
       color: #fff;
       display: flex;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.4rem;
+      letter-spacing: -0.5px;
     }
     .logo span { color: var(--accent); }
     .search-box {
       flex: 1;
-      max-width: 480px;
+      max-width: 440px;
       position: relative;
     }
     .search-box input {
       width: 100%;
-      padding: 0.65rem 1rem 0.65rem 2.5rem;
+      padding: 0.65rem 1rem 0.65rem 2.4rem;
       background: var(--card-bg);
       border: 1px solid var(--border);
       border-radius: 9999px;
@@ -126,7 +126,7 @@ function handleFrontend(origin) {
     }
     .search-box input:focus {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+      box-shadow: 0 0 0 3px var(--accent-glow);
     }
     .search-icon {
       position: absolute;
@@ -134,25 +134,32 @@ function handleFrontend(origin) {
       top: 50%;
       transform: translateY(-50%);
       color: var(--text-muted);
-      font-size: 0.9rem;
+      font-size: 0.85rem;
     }
     main {
       flex: 1;
-      padding: 2rem;
+      padding: 1.5rem;
       max-width: 1400px;
       margin: 0 auto;
       width: 100%;
     }
     h2.section-title {
-      font-size: 1.3rem;
+      font-size: 1.25rem;
       font-weight: 700;
-      margin-bottom: 1.5rem;
+      margin-bottom: 1.25rem;
       color: #fff;
     }
     .anime-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-      gap: 1.5rem;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 1.25rem;
+    }
+    @media (max-width: 640px) {
+      .anime-grid {
+        grid-template-columns: repeat(auto-fill, minmax(135px, 1fr));
+        gap: 0.85rem;
+      }
+      main { padding: 1rem; }
     }
     .anime-card {
       background: var(--card-bg);
@@ -160,19 +167,18 @@ function handleFrontend(origin) {
       overflow: hidden;
       border: 1px solid var(--border);
       cursor: pointer;
-      transition: transform 0.2s, box-shadow 0.2s;
-      position: relative;
+      transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
     }
     .anime-card:hover {
       transform: translateY(-4px);
-      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.5);
+      box-shadow: 0 12px 24px rgba(0, 0, 0, 0.6);
       border-color: var(--accent);
     }
     .poster-wrapper {
       position: relative;
       width: 100%;
       padding-top: 145%;
-      background: #1a1c26;
+      background: #141724;
     }
     .poster-wrapper img {
       position: absolute;
@@ -180,31 +186,31 @@ function handleFrontend(origin) {
       width: 100%; height: 100%;
       object-fit: cover;
     }
-    .card-info { padding: 0.85rem; }
+    .card-info { padding: 0.75rem; }
     .card-title {
-      font-size: 0.95rem;
+      font-size: 0.88rem;
       font-weight: 600;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
     .card-meta {
-      font-size: 0.8rem;
+      font-size: 0.75rem;
       color: var(--text-muted);
-      margin-top: 0.35rem;
+      margin-top: 0.3rem;
       display: flex;
       justify-content: space-between;
     }
-    /* Modal / Viewer de Episódios */
+    /* Modal / Viewer */
     .modal {
       display: none;
       position: fixed;
       inset: 0;
-      background: rgba(0, 0, 0, 0.88);
-      backdrop-filter: blur(8px);
+      background: rgba(0, 0, 0, 0.92);
+      backdrop-filter: blur(10px);
       z-index: 100;
       overflow-y: auto;
-      padding: 2rem 1rem;
+      padding: 1rem;
     }
     .modal.active { display: flex; align-items: center; justify-content: center; }
     .modal-content {
@@ -212,33 +218,44 @@ function handleFrontend(origin) {
       border: 1px solid var(--border);
       border-radius: 14px;
       width: 100%;
-      max-width: 900px;
-      max-height: 90vh;
+      max-width: 950px;
+      max-height: 94vh;
       overflow-y: auto;
       position: relative;
-      padding: 2rem;
+      padding: 1.5rem;
+    }
+    @media (max-width: 640px) {
+      .modal { padding: 0; }
+      .modal-content {
+        max-height: 100vh;
+        height: 100vh;
+        border-radius: 0;
+        padding: 1rem;
+      }
     }
     .close-btn {
       position: absolute;
-      top: 1.25rem; right: 1.25rem;
+      top: 1rem; right: 1rem;
       background: var(--border);
       color: #fff;
       border: none;
       border-radius: 50%;
       width: 36px; height: 36px;
       cursor: pointer;
-      font-size: 1.2rem;
+      font-size: 1.1rem;
       display: flex; align-items: center; justify-content: center;
-      transition: background 0.2s;
+      z-index: 20;
     }
     .close-btn:hover { background: var(--accent); }
     .player-area {
       width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #000;
       border-radius: 8px;
       overflow: hidden;
-      background: #000;
-      margin-bottom: 1.5rem;
+      margin-bottom: 1.25rem;
     }
+    #jwplayer-container { width: 100%; height: 100%; }
     .season-tabs {
       display: flex;
       gap: 0.5rem;
@@ -248,28 +265,28 @@ function handleFrontend(origin) {
       overflow-x: auto;
     }
     .season-tab {
-      padding: 0.5rem 1rem;
+      padding: 0.45rem 0.9rem;
       background: var(--card-hover);
       border: 1px solid var(--border);
       border-radius: 6px;
       color: var(--text);
       cursor: pointer;
-      font-size: 0.85rem;
+      font-size: 0.82rem;
       white-space: nowrap;
     }
     .season-tab.active {
       background: var(--accent);
       border-color: var(--accent);
-      font-weight: 600;
+      font-weight: 700;
     }
     .episodes-list {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-      gap: 0.75rem;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 0.65rem;
     }
     .episode-card {
       padding: 0.75rem;
-      background: #0f111a;
+      background: #0a0c12;
       border: 1px solid var(--border);
       border-radius: 6px;
       cursor: pointer;
@@ -277,10 +294,10 @@ function handleFrontend(origin) {
     }
     .episode-card:hover, .episode-card.active {
       border-color: var(--accent);
-      background: #191c2b;
+      background: #151824;
     }
-    .episode-title { font-size: 0.85rem; font-weight: 600; margin-bottom: 0.25rem; }
-    .episode-number { font-size: 0.75rem; color: var(--accent); font-weight: 700; }
+    .episode-title { font-size: 0.82rem; font-weight: 600; margin-bottom: 0.2rem; }
+    .episode-number { font-size: 0.72rem; color: var(--accent); font-weight: 700; }
   </style>
 </head>
 <body>
@@ -293,7 +310,7 @@ function handleFrontend(origin) {
   </header>
 
   <main>
-    <h2 class="section-title" id="gridTitle">Todos os Animes Catalogados</h2>
+    <h2 class="section-title" id="gridTitle">Catálogo de Animes (Google Drive)</h2>
     <div class="anime-grid" id="animeGrid"></div>
   </main>
 
@@ -302,26 +319,43 @@ function handleFrontend(origin) {
     <div class="modal-content">
       <button class="close-btn" onclick="closeModal()">✕</button>
       
-      <div class="player-area" id="playerArea">
-        <video id="videoPlayer" playsinline controls></video>
+      <div class="player-area">
+        <div id="jwplayer-container"></div>
       </div>
 
-      <h2 id="modalAnimeTitle" style="margin-bottom: 0.5rem;">Anime Title</h2>
-      <p id="modalEpisodeTitle" style="color: var(--text-muted); margin-bottom: 1.5rem; font-size: 0.9rem;">Episódio</p>
+      <h2 id="modalAnimeTitle" style="margin-bottom: 0.4rem; font-size: 1.2rem;">Anime</h2>
+      <p id="modalEpisodeTitle" style="color: var(--text-muted); margin-bottom: 1.25rem; font-size: 0.85rem;">Episódio</p>
 
       <div class="season-tabs" id="seasonTabs"></div>
       <div class="episodes-list" id="episodesList"></div>
     </div>
   </div>
 
-  <script src="https://cdn.plyr.io/3.7.8/plyr.polyfilled.js"></script>
   <script>
-    let player = new Plyr('#videoPlayer', {
-      controls: ['play-large', 'play', 'progress', 'current-time', 'duration', 'mute', 'volume', 'captions', 'settings', 'pip', 'airplay', 'fullscreen'],
-      seekTime: 10
-    });
-
+    let playerInstance = null;
     let activeAnimeData = null;
+
+    function initJWPlayer(streamUrl, title) {
+      if (!playerInstance) {
+        playerInstance = jwplayer("jwplayer-container").setup({
+          file: streamUrl,
+          title: title,
+          width: "100%",
+          height: "100%",
+          autostart: true,
+          preload: "auto",
+          controls: true,
+          playbackRateControls: [0.75, 1, 1.25, 1.5, 2],
+          skin: {
+            controlbar: { iconsActive: "#e11d48" },
+            timeslider: { progress: "#e11d48" }
+          }
+        });
+      } else {
+        playerInstance.load([{ file: streamUrl, title: title }]);
+        playerInstance.play();
+      }
+    }
 
     async function loadCatalog() {
       const res = await fetch('/api/catalog');
@@ -333,13 +367,13 @@ function handleFrontend(origin) {
       const grid = document.getElementById('animeGrid');
       grid.innerHTML = '';
       if (!animes || animes.length === 0) {
-        grid.innerHTML = '<p style="color: var(--text-muted);">Nenhum anime cadastrado no momento.</p>';
+        grid.innerHTML = '<p style="color: var(--text-muted); grid-column: 1/-1;">Nenhum anime cadastrado no momento.</p>';
         return;
       }
       animes.forEach(a => {
         const card = document.createElement('div');
         card.className = 'anime-card';
-        const posterUrl = a.poster_path ? 'https://image.tmdb.org/t/p/w500' + a.poster_path : 'https://via.placeholder.com/300x450/13151f/94a3b8?text=Sem+Capa';
+        const posterUrl = a.poster_path ? 'https://image.tmdb.org/t/p/w500' + a.poster_path : 'https://via.placeholder.com/300x450/11131c/94a3b8?text=Sem+Capa';
         card.innerHTML = \`
           <div class="poster-wrapper">
             <img src="\${posterUrl}" alt="\${a.title}" loading="lazy" />
@@ -396,24 +430,24 @@ function handleFrontend(origin) {
       const eps = season.episodes || [];
       eps.sort((a,b) => a.episode_number - b.episode_number);
 
-      eps.forEach((ep, idx) => {
+      eps.forEach((ep) => {
         const epCard = document.createElement('div');
         epCard.className = 'episode-card';
         const hasSource = ep.media_sources && ep.media_sources.length > 0;
         epCard.innerHTML = \`
-          <div class="episode-number">EPISÓDIO \${ep.episode_number} \${hasSource ? '⚡ Disponível' : '⏳ Aguardando'}</div>
+          <div class="episode-number">EPISÓDIO \${ep.episode_number} \${hasSource ? '⚡ DISPONÍVEL' : '⏳ AGUARDANDO'}</div>
           <div class="episode-title">\${ep.name || 'Episódio ' + ep.episode_number}</div>
         \`;
         if (hasSource) {
           epCard.onclick = () => playEpisode(ep, season);
         } else {
-          epCard.style.opacity = '0.5';
+          epCard.style.opacity = '0.4';
           epCard.style.cursor = 'not-allowed';
         }
         epList.appendChild(epCard);
       });
 
-      // Dá auto-play no primeiro com mídia se houver
+      // Toca o primeiro disponível
       const firstAvailable = eps.find(e => e.media_sources && e.media_sources.length > 0);
       if (firstAvailable) {
         playEpisode(firstAvailable, season);
@@ -423,33 +457,30 @@ function handleFrontend(origin) {
     function playEpisode(ep, season) {
       const source = ep.media_sources[0];
       const streamUrl = '/stream/' + source.gdrive_file_id;
-      document.getElementById('modalEpisodeTitle').innerText = 'Temporada ' + season.season_number + ' • Episódio ' + ep.episode_number + ' - ' + (ep.name || '');
-
-      player.source = {
-        type: 'video',
-        sources: [{ src: streamUrl, type: 'video/mp4' }]
-      };
-      player.play();
+      const title = 'T' + season.season_number + 'E' + ep.episode_number + ' - ' + (ep.name || '');
+      document.getElementById('modalEpisodeTitle').innerText = title;
+      initJWPlayer(streamUrl, title);
     }
 
     function closeModal() {
-      player.stop();
+      if (playerInstance) {
+        playerInstance.stop();
+      }
       document.getElementById('playerModal').classList.remove('active');
     }
 
-    // Busca com Debounce
     let searchTimeout = null;
     document.getElementById('searchInput').addEventListener('input', (e) => {
       clearTimeout(searchTimeout);
-      const query = e.target.value.trim();
+      const q = e.target.value.trim();
       searchTimeout = setTimeout(async () => {
-        if (!query) {
-          document.getElementById('gridTitle').innerText = 'Todos os Animes Catalogados';
+        if (!q) {
+          document.getElementById('gridTitle').innerText = 'Catálogo de Animes (Google Drive)';
           loadCatalog();
           return;
         }
-        document.getElementById('gridTitle').innerText = 'Resultados para "' + query + '"';
-        const res = await fetch('/api/search?q=' + encodeURIComponent(query));
+        document.getElementById('gridTitle').innerText = 'Resultados para "' + q + '"';
+        const res = await fetch('/api/search?q=' + encodeURIComponent(q));
         const data = await res.json();
         renderAnimeGrid(data);
       }, 300);
@@ -511,27 +542,45 @@ async function handleAnimeDetails(tmdbId, env, corsHeaders) {
   });
 }
 
-/* ================= PROXY DE STREAMING GOOGLE DRIVE COM SEEK ================= */
+/* ================= PROXY DE STREAMING GOOGLE DRIVE COM RANGE & BYPASS DE VÍRUS ================= */
 
-async function handleStreamProxy(gdriveId, request, env) {
-  const apiKey = env.GOOGLE_DRIVE_API_KEY;
-  // Endpoint de mídia do Google Drive com chave de API
-  const driveUrl = apiKey
-    ? `https://www.googleapis.com/drive/v3/files/${gdriveId}?alt=media&key=${apiKey}`
-    : `https://drive.google.com/uc?export=download&id=${gdriveId}`;
+async function handleStreamProxy(gdriveId, request) {
+  // O link com &confirm=t desvia do aviso de verificação de vírus para arquivos >100MB
+  const targetUrl = `https://drive.usercontent.google.com/download?id=${gdriveId}&export=download&confirm=t`;
 
   const clientRange = request.headers.get("Range");
-  const headers = new Headers();
+  const fetchHeaders = new Headers({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "*/*"
+  });
+
   if (clientRange) {
-    headers.set("Range", clientRange);
+    fetchHeaders.set("Range", clientRange);
   }
 
-  const driveRes = await fetch(driveUrl, { headers });
+  const driveRes = await fetch(targetUrl, {
+    method: "GET",
+    headers: fetchHeaders,
+    redirect: "follow"
+  });
 
-  const responseHeaders = new Headers(driveRes.headers);
+  const responseHeaders = new Headers();
   responseHeaders.set("Access-Control-Allow-Origin", "*");
+  responseHeaders.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
   responseHeaders.set("Access-Control-Allow-Headers", "Range");
-  responseHeaders.set("Accept-Ranges", "bytes");
+  responseHeaders.set("Content-Type", driveRes.headers.get("Content-Type") || "video/mp4");
+  
+  if (driveRes.headers.has("Content-Length")) {
+    responseHeaders.set("Content-Length", driveRes.headers.get("Content-Length"));
+  }
+  if (driveRes.headers.has("Content-Range")) {
+    responseHeaders.set("Content-Range", driveRes.headers.get("Content-Range"));
+  }
+  if (driveRes.headers.has("Accept-Ranges")) {
+    responseHeaders.set("Accept-Ranges", driveRes.headers.get("Accept-Ranges"));
+  } else {
+    responseHeaders.set("Accept-Ranges", "bytes");
+  }
 
   return new Response(driveRes.body, {
     status: driveRes.status,
