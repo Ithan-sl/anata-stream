@@ -1,0 +1,92 @@
+name: Ingest and Upload Stream
+
+on:
+  workflow_dispatch:
+    inputs:
+      stream_url:
+        description: 'URL remota do stream de vídeo capturado'
+        required: true
+      tmdb_id:
+        description: 'ID numérico do TMDB'
+        required: true
+      season_number:
+        description: 'Número da Temporada'
+        required: true
+        default: '1'
+      episode_number:
+        description: 'Número do Episódio'
+        required: true
+      title_slug:
+        description: 'Identificador do arquivo (ex: jujutsu-kaisen-s01e01)'
+        required: true
+
+jobs:
+  ingest_and_sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Runtime Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg rclone curl
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install Python Dependencies
+        run: pip install requests supabase
+
+      - name: Setup Rclone Configuration
+        env:
+          RCLONE_CONF_B64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
+        run: |
+          mkdir -p ~/.config/rclone
+          echo "$RCLONE_CONF_B64" | base64 -d > ~/.config/rclone/rclone.conf
+
+      - name: Remux Direct Stream (Fast copy without re-encoding)
+        run: |
+          FILE_NAME="${{ inputs.title_slug }}.mp4"
+          echo "[*] Baixando e remuxando stream com streamcopy (-c copy)..."
+          ffmpeg -hide_banner -loglevel error \
+            -user_agent "KlPlayerView/smart-play-lite-apk-1.4 (Linux;Android 10) ExoPlayerLib/2.16.1" \
+            -i "${{ inputs.stream_url }}" \
+            -c copy -movflags +faststart "$FILE_NAME"
+
+          FILE_BYTES=$(stat -c%s "$FILE_NAME")
+          echo "FILE_BYTES=$FILE_BYTES" >> $GITHUB_ENV
+          echo "FILE_NAME=$FILE_NAME" >> $GITHUB_ENV
+
+      - name: Upload to Google Drive (5TB)
+        run: |
+          REMOTE_DIR="gdrive:Animes/${{ inputs.tmdb_id }}/Season_${{ inputs.season_number }}"
+          echo "[*] Enviando via Rclone para $REMOTE_DIR..."
+          rclone copy "$FILE_NAME" "$REMOTE_DIR" --drive-chunk-size 64M --transfers 4 -v
+
+          # Extrai o File ID único do arquivo enviado
+          GDRIVE_FILE_ID=$(rclone lsf "$REMOTE_DIR" --format "i" --files-only --filter "+ $FILE_NAME" | head -n 1)
+          if [ -z "$GDRIVE_FILE_ID" ]; then
+            echo "[-] Erro: Falha ao obter ID do arquivo no Google Drive."
+            exit 1
+          fi
+          echo "GDRIVE_FILE_ID=$GDRIVE_FILE_ID" >> $GITHUB_ENV
+          echo "[+] Upload concluído com sucesso. ID: $GDRIVE_FILE_ID"
+
+      - name: Sync TMDB Metadata and Link Stream in Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+        run: |
+          python3 indexer.py sync --tmdb-id ${{ inputs.tmdb_id }}
+          python3 indexer.py link \
+            --tmdb-id ${{ inputs.tmdb_id }} \
+            --season ${{ inputs.season_number }} \
+            --episode ${{ inputs.episode_number }} \
+            --gdrive-id ${{ env.GDRIVE_FILE_ID }} \
+            --filename ${{ env.FILE_NAME }} \
+            --filesize ${{ env.FILE_BYTES }}

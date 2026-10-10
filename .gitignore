@@ -1,0 +1,7 @@
+# Ignore sensitive credentials
+.env
+setup_github.py
+__pycache__/
+*.pyc
+.vscode/
+.idea/
