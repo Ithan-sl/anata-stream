@@ -1,11 +1,11 @@
 /**
- * Cloudflare Worker: Anata Stream Portal com ArtPlayer (Anime Mobile-First Engine)
- * Substitui JW Player (que gerava Erro 100011 por exigir chave de licença paga)
- * Recursos do ArtPlayer:
- *  - 100% Open-Source (sem chaves, sem travas de domínio, sem erros de licença)
- *  - Controles Mobile: Segurar para 2x (como YouTube), toque duplo para pausar, gestos de volume/brilho
- *  - Suporte completo a MP4 e Google Drive stream com Range HTTP
- *  - PiP, AirPlay, Tela cheia nativa em celulares (orientação automática)
+ * Cloudflare Worker: Anata Stream Portal — Interface de Reprodução Dedicada (Cinema Mode)
+ * Recursos:
+ *  - Página de reprodução individual (não é modal/banner) com suporte a nova aba
+ *  - Player ArtPlayer com modo cinema, iluminação ambiente e botões Próximo / Anterior
+ *  - Roteamento SPA nativo via hash (#/watch/tmdb_id/temporada/episodio)
+ *  - Catálogo de temporadas e episódios organizado em painel lateral/inferior
+ *  - Proxy Google Drive com Range HTTP & bypass de vírus
  */
 
 export default {
@@ -23,8 +23,8 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // 1. Interface Web Principal (SPA)
-    if (path === "/" || path === "/index.html") {
+    // 1. Interface Web Principal (SPA com tela de reprodução dedicada)
+    if (path === "/" || path === "/index.html" || path.startsWith("/watch")) {
       return handleFrontend(url.origin);
     }
 
@@ -45,7 +45,7 @@ export default {
       return handleAnimeDetails(tmdbId, env, corsHeaders);
     }
 
-    // 5. Proxy de Streaming com suporte a Range & Bypass de Vírus do Google Drive
+    // 5. Proxy de Streaming com Range & Bypass de Vírus
     if (path.startsWith("/stream/")) {
       const gdriveId = path.split("/")[2];
       return handleStreamProxy(gdriveId, request);
@@ -55,15 +55,15 @@ export default {
   }
 };
 
-/* ================= FRONTEND WEB COM ARTPLAYER ================= */
+/* ================= FRONTEND WEB COMPLETO (CINEMA MODE) ================= */
 function handleFrontend(origin) {
   const html = `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Anata Stream — Anime Portal</title>
-  <!-- ArtPlayer Engine (Livre de licença, otimizado para animes e mobile) -->
+  <title>Anata Stream — Portal de Animes</title>
+  <!-- ArtPlayer Engine (Open-Source, Mobile-First) -->
   <script src="https://cdn.jsdelivr.net/npm/artplayer/dist/artplayer.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
@@ -72,6 +72,7 @@ function handleFrontend(origin) {
       --card-bg: #11131c;
       --card-hover: #181b29;
       --accent: #e11d48;
+      --accent-hover: #be123c;
       --accent-glow: rgba(225, 29, 72, 0.35);
       --text: #f8fafc;
       --text-muted: #94a3b8;
@@ -87,8 +88,8 @@ function handleFrontend(origin) {
       flex-direction: column;
     }
     header {
-      padding: 1rem 1.5rem;
-      background: rgba(7, 8, 12, 0.9);
+      padding: 0.85rem 1.5rem;
+      background: rgba(7, 8, 12, 0.95);
       backdrop-filter: blur(16px);
       border-bottom: 1px solid var(--border);
       position: sticky;
@@ -107,6 +108,7 @@ function handleFrontend(origin) {
       align-items: center;
       gap: 0.4rem;
       letter-spacing: -0.5px;
+      cursor: pointer;
     }
     .logo span { color: var(--accent); }
     .search-box {
@@ -116,12 +118,12 @@ function handleFrontend(origin) {
     }
     .search-box input {
       width: 100%;
-      padding: 0.65rem 1rem 0.65rem 2.4rem;
+      padding: 0.6rem 1rem 0.6rem 2.4rem;
       background: var(--card-bg);
       border: 1px solid var(--border);
       border-radius: 9999px;
       color: #fff;
-      font-size: 0.9rem;
+      font-size: 0.88rem;
       outline: none;
       transition: all 0.2s;
     }
@@ -137,12 +139,14 @@ function handleFrontend(origin) {
       color: var(--text-muted);
       font-size: 0.85rem;
     }
-    main {
-      flex: 1;
+
+    /* === VISTA 1: CATÁLOGO DE ANIMES === */
+    #catalogView {
       padding: 1.5rem;
       max-width: 1400px;
       margin: 0 auto;
       width: 100%;
+      flex: 1;
     }
     h2.section-title {
       font-size: 1.25rem;
@@ -160,7 +164,7 @@ function handleFrontend(origin) {
         grid-template-columns: repeat(auto-fill, minmax(135px, 1fr));
         gap: 0.85rem;
       }
-      main { padding: 1rem; }
+      #catalogView { padding: 1rem; }
     }
     .anime-card {
       background: var(--card-bg);
@@ -202,178 +206,407 @@ function handleFrontend(origin) {
       display: flex;
       justify-content: space-between;
     }
-    /* Modal / Viewer */
-    .modal {
+
+    /* === VISTA 2: TELA DEDICADA DE REPRODUÇÃO (CINEMA MODE) === */
+    #watchView {
       display: none;
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.92);
-      backdrop-filter: blur(10px);
-      z-index: 100;
-      overflow-y: auto;
-      padding: 1rem;
+      flex: 1;
+      width: 100%;
+      max-width: 1500px;
+      margin: 0 auto;
+      padding: 1rem 1.5rem 3rem;
     }
-    .modal.active { display: flex; align-items: center; justify-content: center; }
-    .modal-content {
+    .watch-nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+    }
+    .back-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 1rem;
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 14px;
-      width: 100%;
-      max-width: 950px;
-      max-height: 94vh;
-      overflow-y: auto;
-      position: relative;
-      padding: 1.5rem;
-    }
-    @media (max-width: 640px) {
-      .modal { padding: 0; }
-      .modal-content {
-        max-height: 100vh;
-        height: 100vh;
-        border-radius: 0;
-        padding: 1rem;
-      }
-    }
-    .close-btn {
-      position: absolute;
-      top: 1rem; right: 1rem;
-      background: var(--border);
-      color: #fff;
-      border: none;
-      border-radius: 50%;
-      width: 36px; height: 36px;
-      cursor: pointer;
-      font-size: 1.1rem;
-      display: flex; align-items: center; justify-content: center;
-      z-index: 20;
-    }
-    .close-btn:hover { background: var(--accent); }
-    .player-area {
-      width: 100%;
-      aspect-ratio: 16 / 9;
-      background: #000;
       border-radius: 8px;
+      color: var(--text);
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+    .back-btn:hover {
+      background: var(--card-hover);
+      border-color: var(--accent);
+    }
+    .theater-container {
+      width: 100%;
+      background: #000;
+      border-radius: 12px;
       overflow: hidden;
+      border: 1px solid var(--border);
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8);
+      aspect-ratio: 16 / 9;
+      max-height: 75vh;
       margin-bottom: 1.25rem;
-      position: relative;
     }
     #artplayer-container { width: 100%; height: 100%; }
+    .watch-details {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 1.5rem;
+      margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+    }
+    .anime-headline h1 {
+      font-size: 1.4rem;
+      font-weight: 800;
+      color: #fff;
+      margin-bottom: 0.3rem;
+    }
+    .anime-headline p {
+      font-size: 0.95rem;
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .ep-nav-controls {
+      display: flex;
+      gap: 0.5rem;
+    }
+    .nav-ep-btn {
+      padding: 0.55rem 1.1rem;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: #fff;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      transition: all 0.2s;
+    }
+    .nav-ep-btn:hover:not(:disabled) {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+    .nav-ep-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
     .season-tabs {
       display: flex;
       gap: 0.5rem;
       border-bottom: 1px solid var(--border);
       padding-bottom: 0.75rem;
-      margin-bottom: 1rem;
+      margin-bottom: 1.25rem;
       overflow-x: auto;
     }
     .season-tab {
-      padding: 0.45rem 0.9rem;
-      background: var(--card-hover);
+      padding: 0.5rem 1rem;
+      background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: 8px;
       color: var(--text);
       cursor: pointer;
-      font-size: 0.82rem;
+      font-size: 0.85rem;
+      font-weight: 600;
       white-space: nowrap;
+      transition: all 0.2s;
     }
     .season-tab.active {
       background: var(--accent);
       border-color: var(--accent);
-      font-weight: 700;
+      color: #fff;
     }
-    .episodes-list {
+    .episodes-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-      gap: 0.65rem;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 0.75rem;
     }
-    .episode-card {
-      padding: 0.75rem;
-      background: #0a0c12;
+    .ep-card {
+      padding: 0.85rem;
+      background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: 8px;
       cursor: pointer;
       transition: all 0.2s;
+      position: relative;
     }
-    .episode-card:hover, .episode-card.active {
+    .ep-card:hover {
       border-color: var(--accent);
-      background: #151824;
+      background: var(--card-hover);
     }
-    .episode-title { font-size: 0.82rem; font-weight: 600; margin-bottom: 0.2rem; }
-    .episode-number { font-size: 0.72rem; color: var(--accent); font-weight: 700; }
+    .ep-card.playing {
+      border-color: var(--accent);
+      background: rgba(225, 29, 72, 0.12);
+    }
+    .ep-card.playing::after {
+      content: 'REPRODUZINDO';
+      position: absolute;
+      top: 0.6rem; right: 0.6rem;
+      font-size: 0.65rem;
+      font-weight: 800;
+      background: var(--accent);
+      color: #fff;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .ep-card-tag {
+      font-size: 0.75rem;
+      color: var(--accent);
+      font-weight: 700;
+      margin-bottom: 0.25rem;
+    }
+    .ep-card-title {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #fff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    @media (max-width: 768px) {
+      .theater-container { border-radius: 0; margin-left: -1rem; margin-right: -1rem; width: calc(100% + 2rem); }
+      #watchView { padding: 0.5rem 1rem 3rem; }
+      .episodes-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+    }
   </style>
 </head>
 <body>
   <header>
-    <div class="logo">ANATA <span>STREAM</span></div>
+    <div class="logo" onclick="navigateToCatalog()">ANATA <span>STREAM</span></div>
     <div class="search-box">
       <span class="search-icon">🔍</span>
-      <input type="text" id="searchInput" placeholder="Pesquisar anime..." />
+      <input type="text" id="searchInput" placeholder="Pesquisar anime no catálogo..." />
     </div>
   </header>
 
-  <main>
+  <!-- 1. ABA DO CATÁLOGO GERAL -->
+  <main id="catalogView">
     <h2 class="section-title" id="gridTitle">Catálogo de Animes (Google Drive)</h2>
     <div class="anime-grid" id="animeGrid"></div>
   </main>
 
-  <!-- Modal do Player e Episódios -->
-  <div class="modal" id="playerModal">
-    <div class="modal-content">
-      <button class="close-btn" onclick="closeModal()">✕</button>
-      
-      <div class="player-area">
-        <div id="artplayer-container"></div>
+  <!-- 2. ABA DEDICADA DE REPRODUÇÃO (SALA DE CINEMA INDIVIDUAL) -->
+  <main id="watchView">
+    <div class="watch-nav">
+      <button class="back-btn" onclick="navigateToCatalog()">
+        ← Voltar ao Catálogo
+      </button>
+      <div class="ep-nav-controls">
+        <button class="nav-ep-btn" id="prevEpBtn" onclick="playAdjacentEpisode(-1)">
+          ⏮ Anterior
+        </button>
+        <button class="nav-ep-btn" id="nextEpBtn" onclick="playAdjacentEpisode(1)">
+          Próximo ⏭
+        </button>
       </div>
-
-      <h2 id="modalAnimeTitle" style="margin-bottom: 0.4rem; font-size: 1.2rem;">Anime</h2>
-      <p id="modalEpisodeTitle" style="color: var(--text-muted); margin-bottom: 1.25rem; font-size: 0.85rem;">Episódio</p>
-
-      <div class="season-tabs" id="seasonTabs"></div>
-      <div class="episodes-list" id="episodesList"></div>
     </div>
-  </div>
+
+    <div class="theater-container">
+      <div id="artplayer-container"></div>
+    </div>
+
+    <div class="watch-details">
+      <div class="anime-headline">
+        <h1 id="watchAnimeTitle">Nome do Anime</h1>
+        <p id="watchEpisodeHeadline">Temporada 1 • Episódio 1</p>
+      </div>
+    </div>
+
+    <div class="season-tabs" id="seasonTabs"></div>
+    <div class="episodes-grid" id="episodesGrid"></div>
+  </main>
 
   <script>
-    let artInstance = null;
-    let activeAnimeData = null;
+    let art = null;
+    let currentAnime = null;
+    let currentSeason = null;
+    let currentEpisode = null;
+    let currentEpisodesList = [];
 
-    function initArtPlayer(streamUrl, title) {
-      if (artInstance) {
-        artInstance.switchUrl(streamUrl, title);
-        artInstance.play();
+    // === INICIALIZAÇÃO E NAVEGAÇÃO ===
+    async function initApp() {
+      await loadCatalog();
+      checkHashRoute();
+      window.addEventListener('hashchange', checkHashRoute);
+    }
+
+    function checkHashRoute() {
+      const hash = window.location.hash;
+      if (hash.startsWith('#/watch/')) {
+        const parts = hash.replace('#/watch/', '').split('/');
+        const tmdbId = parts[0];
+        const seasonNum = parseInt(parts[1] || '1');
+        const epNum = parseInt(parts[2] || '1');
+        openWatchView(tmdbId, seasonNum, epNum);
+      } else {
+        showCatalogView();
+      }
+    }
+
+    function navigateToCatalog() {
+      window.location.hash = '';
+      showCatalogView();
+    }
+
+    function showCatalogView() {
+      if (art) { art.pause(); }
+      document.getElementById('catalogView').style.display = 'block';
+      document.getElementById('watchView').style.display = 'none';
+      document.title = 'Anata Stream — Catálogo de Animes';
+    }
+
+    async function openWatchView(tmdbId, seasonNum = 1, epNum = 1) {
+      document.getElementById('catalogView').style.display = 'none';
+      document.getElementById('watchView').style.display = 'block';
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+
+      if (!currentAnime || currentAnime.tmdb_id != tmdbId) {
+        const res = await fetch('/api/anime/' + tmdbId);
+        currentAnime = await res.json();
+      }
+
+      if (!currentAnime) {
+        alert('Anime não encontrado.');
+        navigateToCatalog();
         return;
       }
 
-      artInstance = new Artplayer({
-        container: '#artplayer-container',
-        url: streamUrl,
-        title: title,
-        type: 'mp4',
-        volume: 0.8,
-        isLive: false,
-        muted: false,
-        autoplay: true,
-        pip: true,
-        autoSize: true,
-        autoMini: false,
-        screenshot: true,
-        setting: true,
-        loop: false,
-        flip: true,
-        playbackRate: true,
-        aspectRatio: true,
-        fullscreen: true,
-        fullscreenWeb: true,
-        playsInline: true,
-        airplay: true,
-        fastForward: true, // Segurar na tela do celular para avançar em 2x
-        theme: '#e11d48',
-        icons: {
-          loading: '<span style="color:#e11d48;font-weight:bold;">Carregando vídeo...</span>'
-        }
-      });
+      document.getElementById('watchAnimeTitle').innerText = currentAnime.title;
+      renderWatchSeasons(currentAnime, seasonNum, epNum);
     }
 
+    // === SELETORES DE TEMPORADAS E EPISÓDIOS ===
+    function renderWatchSeasons(anime, targetSeasonNum, targetEpNum) {
+      const tabs = document.getElementById('seasonTabs');
+      tabs.innerHTML = '';
+      const seasons = (anime.seasons || []).sort((a,b) => a.season_number - b.season_number);
+
+      let selectedSeason = seasons.find(s => s.season_number === targetSeasonNum) || seasons[0];
+      currentSeason = selectedSeason;
+
+      seasons.forEach(s => {
+        const btn = document.createElement('button');
+        btn.className = 'season-tab ' + (s.season_number === selectedSeason.season_number ? 'active' : '');
+        btn.innerText = 'Temporada ' + s.season_number;
+        btn.onclick = () => {
+          document.querySelectorAll('.season-tab').forEach(t => t.classList.remove('active'));
+          btn.classList.add('active');
+          currentSeason = s;
+          renderWatchEpisodes(s, 1);
+        };
+        tabs.appendChild(btn);
+      });
+
+      renderWatchEpisodes(selectedSeason, targetEpNum);
+    }
+
+    function renderWatchEpisodes(season, targetEpNum) {
+      const grid = document.getElementById('episodesGrid');
+      grid.innerHTML = '';
+      currentEpisodesList = (season.episodes || []).sort((a,b) => a.episode_number - b.episode_number);
+
+      let targetEp = currentEpisodesList.find(e => e.episode_number === targetEpNum) || currentEpisodesList[0];
+
+      currentEpisodesList.forEach(ep => {
+        const card = document.createElement('div');
+        const hasMedia = ep.media_sources && ep.media_sources.length > 0;
+        const isCurrent = targetEp && ep.id === targetEp.id;
+
+        card.className = 'ep-card ' + (isCurrent ? 'playing' : '');
+        card.innerHTML = \`
+          <div class="ep-card-tag">EPISÓDIO \${ep.episode_number} \${hasMedia ? '⚡' : '⏳'}</div>
+          <div class="ep-card-title">\${ep.name || 'Episódio ' + ep.episode_number}</div>
+        \`;
+
+        if (hasMedia) {
+          card.onclick = () => playEpisode(ep);
+        } else {
+          card.style.opacity = '0.35';
+          card.style.cursor = 'not-allowed';
+        }
+        grid.appendChild(card);
+      });
+
+      if (targetEp && targetEp.media_sources && targetEp.media_sources.length > 0) {
+        playEpisode(targetEp);
+      }
+    }
+
+    // === REPRODUÇÃO NO ARTPLAYER ===
+    function playEpisode(ep) {
+      currentEpisode = ep;
+      const media = ep.media_sources[0];
+      const streamUrl = '/stream/' + media.gdrive_file_id + '/video.mp4';
+      const epLabel = 'T' + currentSeason.season_number + 'E' + ep.episode_number + ' • ' + (ep.name || 'Episódio ' + ep.episode_number);
+      
+      document.getElementById('watchEpisodeHeadline').innerText = epLabel;
+      document.title = currentAnime.title + ' — ' + epLabel;
+      window.location.hash = '#/watch/' + currentAnime.tmdb_id + '/' + currentSeason.season_number + '/' + ep.episode_number;
+
+      // Atualiza estado visual dos cards
+      document.querySelectorAll('.ep-card').forEach(c => c.classList.remove('playing'));
+      const activeIdx = currentEpisodesList.findIndex(e => e.id === ep.id);
+      const cards = document.querySelectorAll('.ep-card');
+      if (cards[activeIdx]) { cards[activeIdx].classList.add('playing'); }
+
+      // Atualiza botões Anterior / Próximo
+      document.getElementById('prevEpBtn').disabled = (activeIdx <= 0);
+      document.getElementById('nextEpBtn').disabled = (activeIdx >= currentEpisodesList.length - 1);
+
+      if (!art) {
+        art = new Artplayer({
+          container: '#artplayer-container',
+          url: streamUrl,
+          title: epLabel,
+          type: 'mp4',
+          volume: 0.8,
+          autoplay: true,
+          pip: true,
+          autoSize: true,
+          setting: true,
+          loop: false,
+          playbackRate: true,
+          aspectRatio: true,
+          fullscreen: true,
+          fullscreenWeb: true,
+          playsInline: true,
+          airplay: true,
+          fastForward: true, // Segurar na tela do celular para 2x
+          theme: '#e11d48',
+          icons: {
+            loading: '<span style="color:#e11d48;font-weight:bold;">Carregando stream...</span>'
+          }
+        });
+
+        // Quando o episódio terminar, avança automaticamente para o próximo
+        art.on('video:ended', () => {
+          playAdjacentEpisode(1);
+        });
+      } else {
+        art.switchUrl(streamUrl, epLabel);
+        art.play();
+      }
+    }
+
+    function playAdjacentEpisode(delta) {
+      if (!currentEpisodesList || currentEpisodesList.length === 0) return;
+      const currentIdx = currentEpisodesList.findIndex(e => e.id === currentEpisode.id);
+      const targetIdx = currentIdx + delta;
+      if (targetIdx >= 0 && targetIdx < currentEpisodesList.length) {
+        const nextEp = currentEpisodesList[targetIdx];
+        if (nextEp.media_sources && nextEp.media_sources.length > 0) {
+          playEpisode(nextEp);
+        }
+      }
+    }
+
+    // === CATÁLOGO E BUSCA ===
     async function loadCatalog() {
       const res = await fetch('/api/catalog');
       const data = await res.json();
@@ -403,87 +636,12 @@ function handleFrontend(origin) {
             </div>
           </div>
         \`;
-        card.onclick = () => openAnimeDetails(a.tmdb_id);
+        // Ao clicar, navega para a aba de reprodução individual com URL compartilhável
+        card.onclick = () => {
+          window.location.hash = '#/watch/' + a.tmdb_id + '/1/1';
+        };
         grid.appendChild(card);
       });
-    }
-
-    async function openAnimeDetails(tmdbId) {
-      const res = await fetch('/api/anime/' + tmdbId);
-      const anime = await res.json();
-      activeAnimeData = anime;
-
-      document.getElementById('modalAnimeTitle').innerText = anime.title;
-      renderSeasons(anime);
-      document.getElementById('playerModal').classList.add('active');
-    }
-
-    function renderSeasons(anime) {
-      const tabs = document.getElementById('seasonTabs');
-      tabs.innerHTML = '';
-      const seasons = anime.seasons || [];
-      seasons.sort((a,b) => a.season_number - b.season_number);
-
-      seasons.forEach((s, idx) => {
-        const tab = document.createElement('button');
-        tab.className = 'season-tab ' + (idx === 0 ? 'active' : '');
-        tab.innerText = 'Temporada ' + s.season_number;
-        tab.onclick = () => {
-          document.querySelectorAll('.season-tab').forEach(t => t.classList.remove('active'));
-          tab.classList.add('active');
-          renderEpisodes(s);
-        };
-        tabs.appendChild(tab);
-      });
-
-      if (seasons.length > 0) {
-        renderEpisodes(seasons[0]);
-      }
-    }
-
-    function renderEpisodes(season) {
-      const epList = document.getElementById('episodesList');
-      epList.innerHTML = '';
-      const eps = season.episodes || [];
-      eps.sort((a,b) => a.episode_number - b.episode_number);
-
-      eps.forEach((ep) => {
-        const epCard = document.createElement('div');
-        epCard.className = 'episode-card';
-        const hasSource = ep.media_sources && ep.media_sources.length > 0;
-        epCard.innerHTML = \`
-          <div class="episode-number">EPISÓDIO \${ep.episode_number} \${hasSource ? '⚡ DISPONÍVEL' : '⏳ AGUARDANDO'}</div>
-          <div class="episode-title">\${ep.name || 'Episódio ' + ep.episode_number}</div>
-        \`;
-        if (hasSource) {
-          epCard.onclick = () => playEpisode(ep, season);
-        } else {
-          epCard.style.opacity = '0.4';
-          epCard.style.cursor = 'not-allowed';
-        }
-        epList.appendChild(epCard);
-      });
-
-      // Toca o primeiro disponível
-      const firstAvailable = eps.find(e => e.media_sources && e.media_sources.length > 0);
-      if (firstAvailable) {
-        playEpisode(firstAvailable, season);
-      }
-    }
-
-    function playEpisode(ep, season) {
-      const source = ep.media_sources[0];
-      const streamUrl = '/stream/' + source.gdrive_file_id + '/video.mp4';
-      const title = 'T' + season.season_number + 'E' + ep.episode_number + ' - ' + (ep.name || '');
-      document.getElementById('modalEpisodeTitle').innerText = title;
-      initArtPlayer(streamUrl, title);
-    }
-
-    function closeModal() {
-      if (artInstance) {
-        artInstance.pause();
-      }
-      document.getElementById('playerModal').classList.remove('active');
     }
 
     let searchTimeout = null;
@@ -503,7 +661,7 @@ function handleFrontend(origin) {
       }, 300);
     });
 
-    loadCatalog();
+    initApp();
   </script>
 </body>
 </html>`;
