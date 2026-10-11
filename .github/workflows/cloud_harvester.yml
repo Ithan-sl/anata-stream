@@ -16,6 +16,10 @@ concurrency:
   group: cloud-harvester
   cancel-in-progress: false
 
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   harvest_cloud:
     runs-on: ubuntu-latest
@@ -33,7 +37,8 @@ jobs:
 
       - name: Run Harvester in GitHub Cloud (Intelligent Gap Detection)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Usa o Personal Access Token (GH_PAT) para permissão de disparo sem erro 403
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

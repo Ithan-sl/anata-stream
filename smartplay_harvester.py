@@ -102,10 +102,11 @@ def is_strict_anime(tmdb_id: str) -> bool:
         return False
 
 def dispatch_to_github(stream_url: str, tmdb_id: str, season_num: int, ep_num: int, title_slug: str):
-    """Envia o episódio para o runner do GitHub Actions."""
+    """Envia o episódio para o runner do GitHub Actions com retentativa."""
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_PAT") or "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"
     url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/ingest_stream.yml/dispatches"
     headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
+        "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json"
     }
     payload = {
@@ -118,13 +119,21 @@ def dispatch_to_github(stream_url: str, tmdb_id: str, season_num: int, ep_num: i
             "title_slug": title_slug
         }
     }
-    r = requests.post(url, headers=headers, json=payload, timeout=10)
-    if r.status_code == 204:
-        print(f"      [✓] Enfileirado no GitHub Actions com sucesso!")
-        return True
-    else:
-        print(f"      [-] Falha ao enfileirar: {r.status_code} {r.text}")
-        return False
+    for attempt in range(3):
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=12)
+            if r.status_code == 204:
+                print(f"      [✓] Enfileirado no GitHub Actions com sucesso!")
+                return True
+            elif r.status_code == 403 and "rate limit" in r.text.lower():
+                print(f"      [!] Rate limit atingido. Aguardando 10 segundos...")
+                time.sleep(10)
+            else:
+                print(f"      [-] Resposta da API (Tentativa {attempt+1}): {r.status_code} {r.text}")
+                time.sleep(3)
+        except Exception as e:
+            time.sleep(2)
+    return False
 
 def harvest_anime_post(post_id: str, anime_title: str):
     clean_session()
