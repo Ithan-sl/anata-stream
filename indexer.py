@@ -43,6 +43,55 @@ def sync_anime(tmdb_id: int) -> str:
 
     url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?language=pt-BR"
     res = requests.get(url, headers=headers)
+    if res.status_code == 404:
+        # Fallback para Filme de Animação
+        m_url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?language=pt-BR"
+        m_res = requests.get(m_url, headers=headers)
+        m_res.raise_for_status()
+        m_data = m_res.json()
+
+        movie_payload = {
+            "tmdb_id": m_data["id"],
+            "title": m_data.get("title"),
+            "original_title": m_data.get("original_title"),
+            "overview": m_data.get("overview"),
+            "poster_path": m_data.get("poster_path"),
+            "backdrop_path": m_data.get("backdrop_path"),
+            "first_air_date": m_data.get("release_date") or None,
+            "status": m_data.get("status"),
+            "genres": m_data.get("genres", [])
+        }
+        db_movie = supabase.table("animes").upsert(movie_payload, on_conflict="tmdb_id").execute()
+        anime_id = db_movie.data[0]["id"]
+        print(f"[+] Filme de Animação persistido: {movie_payload['title']} [UUID: {anime_id}]")
+
+        # Cria Temporada 1 fictícia para o filme
+        s_payload = {
+            "anime_id": anime_id,
+            "tmdb_id": m_data["id"],
+            "season_number": 1,
+            "name": "Filme",
+            "overview": m_data.get("overview"),
+            "poster_path": m_data.get("poster_path"),
+            "episode_count": 1
+        }
+        db_s = supabase.table("seasons").upsert(s_payload, on_conflict="anime_id, season_number").execute()
+        season_id = db_s.data[0]["id"]
+
+        # Cria Episódio 1 fictício para o filme
+        ep_payload = {
+            "season_id": season_id,
+            "episode_number": 1,
+            "name": m_data.get("title"),
+            "overview": m_data.get("overview"),
+            "still_path": m_data.get("backdrop_path"),
+            "tmdb_id": m_data["id"],
+            "air_date": m_data.get("release_date") or None
+        }
+        supabase.table("episodes").upsert(ep_payload, on_conflict="season_id, episode_number").execute()
+        print(f"  [+] Filme indexado como T01E01.")
+        return anime_id
+
     res.raise_for_status()
     data = res.json()
 

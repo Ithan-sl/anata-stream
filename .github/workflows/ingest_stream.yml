@@ -20,9 +20,9 @@ on:
         description: 'Identificador do arquivo (ex: toaru-s01e01)'
         required: true
 
-# Concorrência controlada por grupo: organiza em fila sem sobrecarregar o runner
+# Concorrência por episódio: impede duplicatas do mesmo episódio sem bloquear episódios diferentes
 concurrency:
-  group: ingest-queue
+  group: ingest-${{ inputs.tmdb_id }}-s${{ inputs.season_number }}e${{ inputs.episode_number }}
   cancel-in-progress: false
 
 jobs:
