@@ -42,7 +42,7 @@ APP_VERSION = "smart-play-lite-apk-1.4"
 EXOPLAYER_UA = "KlPlayerView/smart-play-lite-apk-1.4 (Linux;Android 10) ExoPlayerLib/2.16.1"
 
 # Credenciais e Endpoints
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "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")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "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")
 GITHUB_REPO = "Ithan-sl/anata-stream"
 TMDB_TOKEN = os.environ.get(
     "TMDB_READ_ACCESS_TOKEN",
