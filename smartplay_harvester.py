@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-smartplay_harvester.py — Harvester Inteligente com Detecção de Lacunas (Gap-Detection)
-Recursos:
- - Consulta o Supabase em tempo real para verificar quais episódios já foram baixados
- - Se um anime estiver incompleto (ex: 8 de 12 episódios), detecta e baixa APENAS os faltantes
- - Se o anime já estiver 100% completo, pula instantaneamente sem gastar banda
- - Proteção absoluta anti-duplicação (zero arquivos duplicados no Google Drive ou Supabase)
- - Filtro estrito de produções japonesas (ignora desenhos ocidentais)
- - Limpeza contínua de cabeçalhos contra erro HTTP 431
+smartplay_harvester.py — Harvester com Filtro Estrito de Animação (Séries & Filmes)
+Regras de Filtragem no TheMovieDB:
+ - PERMITIDO: Qualquer Anime Japonês (Séries e Filmes de Anime)
+ - PERMITIDO: Animações como Rick and Morty, Arcane, Castlevania, Invincible (Gênero 16: Animação)
+ - ESTRITAMENTE BLOQUEADO: Filmes normais com atores reais (Live-Action)
+ - ESTRITAMENTE BLOQUEADO: Séries normais com atores reais (Live-Action)
 """
 
 import os
@@ -22,7 +20,7 @@ BASE_URL = "https://smartplayliteapk.net"
 USER_AGENT = "Mozilla/5.0 (Linux; Android 10; NEN-LX1 Build/HUAWEINEN-LX1; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/83.0.4103.106 Mobile Safari/537.36"
 PACKAGE_NAME = "com.visionvibes2v2.trailer"
 
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "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")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_PAT") or "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"
 GITHUB_REPO = "Ithan-sl/anata-stream"
 TMDB_TOKEN = os.environ.get(
     "TMDB_READ_ACCESS_TOKEN",
@@ -49,10 +47,7 @@ def clean_session():
     session.headers.update(BASE_HEADERS)
 
 def get_existing_episodes_set(tmdb_id: str) -> set:
-    """
-    Consulta o Supabase e retorna os episódios que JÁ possuem mídia no Google Drive.
-    Retorna um conjunto de tuplas (temporada, episodio), ex: {(1, 1), (1, 2)}
-    """
+    """Retorna episódios que já possuem mídia no Google Drive/Supabase."""
     if not tmdb_id or tmdb_id == "0":
         return set()
 
@@ -82,24 +77,53 @@ def get_existing_episodes_set(tmdb_id: str) -> set:
     except Exception:
         return set()
 
-def is_strict_anime(tmdb_id: str) -> bool:
-    """Verifica no TMDB se o item é legitimamente um anime japonês."""
-    if not tmdb_id or tmdb_id == "0":
-        return False
-
-    url = f"https://api.themoviedb.org/3/tv/{tmdb_id}"
+def is_allowed_animation(tmdb_id: str, title: str) -> tuple[bool, str]:
+    """
+    Verifica se o item é uma ANIMAÇÃO (Anime ou Animação Ocidental como Rick and Morty).
+    Retorna (permitido: bool, tipo: 'tv' | 'movie' | 'none')
+    """
     headers = {"Authorization": f"Bearer {TMDB_TOKEN}", "Accept": "application/json"}
-    try:
-        r = requests.get(url, headers=headers, params={"language": "pt-BR"}, timeout=8)
-        if r.status_code != 200:
-            return False
-        data = r.json()
-        origin_countries = data.get("origin_country", [])
 
-        # FILTRO ESTRITO: Produção Japonesa ('JP')
-        return "JP" in origin_countries
+    # 1. Tenta validar como Série/Anime no endpoint /tv/
+    if tmdb_id and tmdb_id != "0":
+        try:
+            r = requests.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}", headers=headers, params={"language": "pt-BR"}, timeout=8)
+            if r.status_code == 200:
+                data = r.json()
+                genre_ids = [g.get("id") for g in data.get("genres", [])]
+                # 16 = Gênero Animação no TMDB
+                if 16 in genre_ids:
+                    return True, "tv"
+        except Exception:
+            pass
+
+        # 2. Tenta validar como Filme de Animação no endpoint /movie/
+        try:
+            r = requests.get(f"https://api.themoviedb.org/3/movie/{tmdb_id}", headers=headers, params={"language": "pt-BR"}, timeout=8)
+            if r.status_code == 200:
+                data = r.json()
+                genre_ids = [g.get("id") for g in data.get("genres", [])]
+                if 16 in genre_ids:
+                    return True, "movie"
+        except Exception:
+            pass
+
+    # 3. Busca pelo título no TMDB (caso o ID original seja divergente)
+    clean_search = re.sub(r'[\(\)\[\]\-]+', ' ', title).strip()
+    try:
+        r = requests.get("https://api.themoviedb.org/3/search/multi", headers=headers, params={"query": clean_search, "language": "pt-BR"}, timeout=8)
+        if r.status_code == 200:
+            results = r.json().get("results", [])
+            for res in results:
+                m_type = res.get("media_type") # 'tv' ou 'movie'
+                g_ids = res.get("genre_ids", [])
+                if 16 in g_ids:
+                    return True, m_type
     except Exception:
-        return False
+        pass
+
+    # Se não contém o gênero 16 (Animação), é filme ou série live-action com atores reais -> BLOQUEADO!
+    return False, "none"
 
 def dispatch_to_github(stream_url: str, tmdb_id: str, season_num: int, ep_num: int, title_slug: str):
     """Envia o episódio para o runner do GitHub Actions com retentativa."""
@@ -131,9 +155,39 @@ def dispatch_to_github(stream_url: str, tmdb_id: str, season_num: int, ep_num: i
             else:
                 print(f"      [-] Resposta da API (Tentativa {attempt+1}): {r.status_code} {r.text}")
                 time.sleep(3)
-        except Exception as e:
+        except Exception:
             time.sleep(2)
     return False
+
+def harvest_movie(movie_id: str, title: str, tmdb_id: str):
+    """Processa e enfileira um filme de anime ou filme de animação."""
+    existing = get_existing_episodes_set(tmdb_id)
+    if (1, 1) in existing:
+        print(f"  [✓ Já no Drive] Filme '{title}' já armazenado no Google Drive. Pulando...")
+        return
+
+    player_url = f"{BASE_URL}/player/movie"
+    player_payload = {"movie_id": str(movie_id), "action_type": "PLAY"}
+    clean_session()
+    
+    try:
+        p_res = session.post(player_url, json=player_payload, timeout=15)
+        p_data = p_res.json()
+    except Exception as e:
+        print(f"  [-] Erro ao carregar player do filme: {e}")
+        return
+
+    if not p_data.get("success") or not p_data.get("players"):
+        print(f"  [-] Nenhum stream disponível para o filme '{title}'")
+        return
+
+    video_stream = p_data["players"][0].get("file")
+    clean_slug = re.sub(r'[^a-zA-Z0-9]+', '-', title).strip('-').lower()
+    slug = f"{clean_slug}-filme"
+
+    print(f"  ▶ Enfileirando Filme de Animação: {title} (TMDB {tmdb_id})...")
+    dispatch_to_github(video_stream, tmdb_id, 1, 1, slug)
+    time.sleep(3)
 
 def harvest_anime_post(post_id: str, anime_title: str):
     clean_session()
@@ -142,42 +196,56 @@ def harvest_anime_post(post_id: str, anime_title: str):
     try:
         res = session.get(post_url, timeout=15)
     except Exception as e:
-        print(f"[-] Falha ao conectar ao anime {post_id}: {e}")
+        print(f"[-] Falha ao conectar ao título #{post_id}: {e}")
         return
 
     if res.status_code != 200:
-        print(f"[-] Erro ao carregar anime {post_id}: HTTP {res.status_code}")
-        return
+        # Tenta rota de filme se não for post de anime
+        post_url = f"{BASE_URL}/posts/filmes/post/{post_id}"
+        res = session.get(post_url, timeout=15)
+        if res.status_code != 200:
+            print(f"[-] Erro ao carregar #{post_id}: HTTP {res.status_code}")
+            return
 
-    # Extrai temporadas dos cabeçalhos Set-Cookie
+    # Extrai temporadas dos cookies (se for série/anime)
     set_cookie_header = res.headers.get("Set-Cookie", "")
     seasons_key = f"seasons_{post_id}"
     m = re.search(rf'{seasons_key}=([^;]+)', set_cookie_header)
-
     raw_seasons = m.group(1) if m else session.cookies.get(seasons_key)
+
+    sample_tmdb = None
+    if raw_seasons:
+        try:
+            seasons_data = json.loads(urllib.parse.unquote(raw_seasons))
+            if seasons_data:
+                sample_tmdb = seasons_data[0].get("tmdb")
+        except Exception:
+            pass
+
+    # FILTRO: Valida se é Animação (Anime japonês ou animação como Rick and Morty)
+    is_anim, media_kind = is_allowed_animation(sample_tmdb, anime_title)
+    if not is_anim:
+        print(f"  [🚫 BLOQUEADO] '{anime_title}' NÃO é animação (Filme/Série live-action normal detectado). Pulando...")
+        return
+
+    print(f"  [🎨 ANIMAÇÃO VALIDADA] {anime_title} (TMDB: {sample_tmdb or 'Auto'})")
+
+    # CASO 1: É um Filme de Animação
+    movie_match = re.search(r"loadMoviePlayers\(['\"](\d+)['\"],\s*['\"]PLAY['\"]\)", res.text)
+    if movie_match:
+        movie_id = movie_match.group(1)
+        harvest_movie(movie_id, anime_title, sample_tmdb or post_id)
+        return
+
+    # CASO 2: É uma Série de Anime / Animação
     if not raw_seasons:
-        print(f"[-] Nenhuma temporada encontrada para '{anime_title}' ({post_id})")
+        print(f"[-] Nenhuma temporada encontrada para '{anime_title}' (#{post_id})")
         return
 
-    try:
-        seasons_data = json.loads(urllib.parse.unquote(raw_seasons))
-    except Exception as e:
-        print(f"[-] Erro ao decodificar JSON das temporadas: {e}")
-        return
-
-    sample_tmdb = seasons_data[0].get("tmdb") if seasons_data else None
-    if not is_strict_anime(sample_tmdb):
-        print(f"  [🚫 FILTRADO] '{anime_title}' (TMDB: {sample_tmdb}) NÃO é produção japonesa. Pulando...")
-        return
-
-    print(f"  [🎌 ANIME VALIDADO] {anime_title} (TMDB: {sample_tmdb})")
-
-    # Obtém o mapa de episódios já baixados no Supabase / Google Drive
     existing_eps = get_existing_episodes_set(sample_tmdb)
     if existing_eps:
-        print(f"  📊 Status atual no banco: {len(existing_eps)} episódio(s) já cadastrado(s).")
+        print(f"  📊 Status no banco: {len(existing_eps)} episódio(s) já cadastrado(s).")
 
-    # Garante ordenação sequencial de temporadas
     seasons_data.sort(key=lambda s: int(s.get("t", 1)))
 
     for s in seasons_data:
@@ -196,7 +264,6 @@ def harvest_anime_post(post_id: str, anime_title: str):
             continue
 
         if ep_res.status_code != 200:
-            print(f"  [-] Erro HTTP {ep_res.status_code} na temporada {season_id}")
             continue
 
         pattern = re.findall(
@@ -208,12 +275,11 @@ def harvest_anime_post(post_id: str, anime_title: str):
         if not pattern:
             continue
 
-        # Detecta lacunas da temporada
         total_eps = len(pattern)
         season_existing = [e for (s_idx, e) in existing_eps if s_idx == season_num]
         
         if len(season_existing) == total_eps and total_eps > 0:
-            print(f"  [✓ COMPLETO] {season_name} ({total_eps}/{total_eps} eps já no Google Drive). Pulando temporada...")
+            print(f"  [✓ COMPLETO] {season_name} ({total_eps}/{total_eps} eps já no Google Drive).")
             continue
 
         missing_count = total_eps - len(season_existing)
@@ -228,14 +294,12 @@ def harvest_anime_post(post_id: str, anime_title: str):
                 num_only = re.search(r'\d+', ep_label)
                 ep_num = int(num_only.group(0)) if num_only else 1
 
-            # VERIFICAÇÃO DE LACUNA: Se o episódio já existe no banco/drive, PULA!
             if (season_num, ep_num) in existing_eps:
                 print(f"    [✓ Já no Drive] T{season_num:02d}E{ep_num:02d} - Ignorado.")
                 continue
 
             print(f"    [⚡ LACUNA DETECTADA] T{season_num:02d}E{ep_num:02d} não encontrado no banco. Baixando...")
 
-            # Busca stream direto via API do player
             player_url = f"{BASE_URL}/player/episode"
             player_payload = {"ep_id": str(ep_id), "action_type": "PLAY"}
             
@@ -247,7 +311,6 @@ def harvest_anime_post(post_id: str, anime_title: str):
                 continue
 
             if not p_data.get("success") or not p_data.get("players"):
-                print(f"      [-] Stream indisponível na fonte para Ep {ep_num}")
                 continue
 
             video_stream = p_data["players"][0].get("file")
@@ -257,13 +320,12 @@ def harvest_anime_post(post_id: str, anime_title: str):
             print(f"      ▶ Enfileirando T{season_num:02d}E{ep_num:02d} no GitHub Actions...")
             dispatch_to_github(video_stream, tmdb_id, season_num, ep_num, slug)
             
-            # Adiciona ao conjunto local para evitar duplo disparo na mesma execução
             existing_eps.add((season_num, ep_num))
             time.sleep(3)
 
 def crawl_catalog(start_page=1, max_pages=10):
     print("================================================================")
-    print("  ANATA STREAM — HARVESTER INTELIGENTE (DETECÇÃO DE LACUNAS)")
+    print("  ANATA STREAM — HARVESTER DE ANIMAÇÕES & FILMES DE ANIME")
     print("================================================================")
 
     for page in range(start_page, max_pages + 1):
