@@ -42,12 +42,9 @@ APP_VERSION = "smart-play-lite-apk-1.4"
 EXOPLAYER_UA = "KlPlayerView/smart-play-lite-apk-1.4 (Linux;Android 10) ExoPlayerLib/2.16.1"
 
 # Credenciais e Endpoints
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "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")
-GITHUB_REPO = "Ithan-sl/anata-stream"
-TMDB_TOKEN = os.environ.get(
-    "TMDB_READ_ACCESS_TOKEN",
-    "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5YzMxYjNhZWIyZTU5YWEyY2FmNzRjNzQ1Y2UxNTg4NyIsIm5iZiI6MTc2NjA3MTQ0MC40MDMsInN1YiI6IjY5NDQxYzkwNjRhOWQ4N2RiYzcwNTZlNiIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.Pa2-x5hvsHeepw5f70ffBGX9L-4AaU7NBYtp8qSTQDA"
-)
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_PAT")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "Ithan-sl/anata-stream")
+TMDB_TOKEN = os.environ.get("TMDB_READ_ACCESS_TOKEN")
 
 JS_BRIDGE_MOCK = f"""
 Object.defineProperty(window, 'RoboTemplatesWebViewApp', {{

@@ -40,18 +40,12 @@ USER_AGENT = "Mozilla/5.0 (Linux; Android 10; NEN-LX1 Build/HUAWEINEN-LX1; wv) A
 EXOPLAYER_UA = "KlPlayerView/smart-play-lite-apk-1.4 (Linux;Android 10) ExoPlayerLib/2.16.1"
 PACKAGE_NAME = "com.visionvibes2v2.trailer"
 
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_PAT") or "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"
+# Credenciais carregadas estritamente de variáveis de ambiente (sem valores expostos)
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_PAT")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "Ithan-sl/anata-stream")
-TMDB_TOKEN = os.environ.get(
-    "TMDB_READ_ACCESS_TOKEN",
-    "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI5YzMxYjNhZWIyZTU5YWEyY2FmNzRjNzQ1Y2UxNTg4NyIsIm5iZiI6MTc2NjA3MTQ0MC40MDMsInN1YiI6IjY5NDQxYzkwNjRhOWQ4N2RiYzcwNTZlNiIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.Pa2-x5hvsHeepw5f70ffBGX9L-4AaU7NBYtp8qSTQDA"
-)
-
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://vazcfgkdbqnurankimcd.supabase.co")
-SUPABASE_KEY = os.environ.get(
-    "SUPABASE_SERVICE_ROLE_KEY",
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZhemNmZ2tkYnFudXJhbmtpbWNkIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MTY1Nzg5NiwiZXhwIjoyMTA3MjMzODk2fQ.IenjvA6Pj1ZcXOIFBrNQ5PlxoP42vHGcZ3nzRAy1Wjo"
-)
+TMDB_TOKEN = os.environ.get("TMDB_READ_ACCESS_TOKEN")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
 session = requests.Session()
 BASE_HEADERS = {
@@ -109,7 +103,7 @@ def get_existing_episodes_set(tmdb_id: str) -> set:
     }
 
     try:
-        r = requests.get(url, headers=headers, timeout=8)
+        r = session.get(url, headers=headers, timeout=12)
         if r.status_code != 200:
             return set()
         data = r.json()
@@ -138,7 +132,7 @@ def is_allowed_animation(tmdb_id: str, title: str) -> tuple[bool, str]:
     # 1. Tenta validar como Série/Anime no endpoint /tv/
     if tmdb_id and tmdb_id != "0":
         try:
-            r = requests.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}", headers=headers, params={"language": "pt-BR"}, timeout=8)
+            r = requests.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}", headers=headers, params={"language": "pt-BR"}, timeout=10)
             if r.status_code == 200:
                 data = r.json()
                 genre_ids = [g.get("id") for g in data.get("genres", [])]
@@ -150,7 +144,7 @@ def is_allowed_animation(tmdb_id: str, title: str) -> tuple[bool, str]:
 
         # 2. Tenta validar como Filme de Animação no endpoint /movie/
         try:
-            r = requests.get(f"https://api.themoviedb.org/3/movie/{tmdb_id}", headers=headers, params={"language": "pt-BR"}, timeout=8)
+            r = requests.get(f"https://api.themoviedb.org/3/movie/{tmdb_id}", headers=headers, params={"language": "pt-BR"}, timeout=10)
             if r.status_code == 200:
                 data = r.json()
                 genre_ids = [g.get("id") for g in data.get("genres", [])]
@@ -162,7 +156,7 @@ def is_allowed_animation(tmdb_id: str, title: str) -> tuple[bool, str]:
     # 3. Busca pelo título no TMDB (caso o ID original seja divergente)
     clean_search = re.sub(r'[\(\)\[\]\-]+', ' ', title).strip()
     try:
-        r = requests.get("https://api.themoviedb.org/3/search/multi", headers=headers, params={"query": clean_search, "language": "pt-BR"}, timeout=8)
+        r = requests.get("https://api.themoviedb.org/3/search/multi", headers=headers, params={"query": clean_search, "language": "pt-BR"}, timeout=10)
         if r.status_code == 200:
             results = r.json().get("results", [])
             for res in results:
@@ -177,7 +171,11 @@ def is_allowed_animation(tmdb_id: str, title: str) -> tuple[bool, str]:
 
 def dispatch_to_github(stream_url: str, tmdb_id: str, season_num: int, ep_num: int, title_slug: str) -> bool:
     """Envia o episódio para o runner do GitHub Actions via workflow_dispatch."""
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_PAT") or "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"
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_PAT")
+    if not token:
+        print("      [-] Erro: GITHUB_TOKEN / GH_PAT não definido para despacho.")
+        return False
+
     url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/ingest_stream.yml/dispatches"
     headers = {
         "Authorization": f"token {token}",
@@ -205,7 +203,8 @@ def dispatch_to_github(stream_url: str, tmdb_id: str, season_num: int, ep_num: i
             else:
                 print(f"      [-] Resposta da API (Tentativa {attempt+1}): {r.status_code} {r.text}")
                 time.sleep(3)
-        except Exception:
+        except Exception as e:
+            print(f"      [-] Erro na conexão com GitHub (Tentativa {attempt+1}): {e}")
             time.sleep(2)
     return False
 
@@ -326,29 +325,108 @@ def harvest_movie(movie_id: str, title: str, tmdb_id: str, mode: str = "direct")
     player_payload = {"movie_id": str(movie_id), "action_type": "PLAY"}
     prune_cookies()
 
+    success = False
+    for attempt in range(1, 4):
+        try:
+            p_res = session.post(player_url, json=player_payload, timeout=20)
+            p_data = p_res.json()
+            if not p_data.get("success") or not p_data.get("players"):
+                print(f"  [!] [Tentativa {attempt}/3] Nenhum stream retornado para o filme '{title}'.")
+                time.sleep(3)
+                continue
+
+            video_stream = p_data["players"][0].get("file")
+            clean_slug = re.sub(r'[^a-zA-Z0-9]+', '-', title).strip('-').lower()
+            slug = f"{clean_slug}-filme"
+
+            print(f"  ▶ [Tentativa {attempt}/3] Processando Filme de Animação: {title} (TMDB {tmdb_id})...")
+            if process_episode(video_stream, tmdb_id, 1, 1, slug, mode=mode):
+                success = True
+                break
+            time.sleep(3)
+        except Exception as e:
+            print(f"  [-] [Tentativa {attempt}/3] Erro no player do filme: {e}")
+            time.sleep(3)
+
+    if not success:
+        print(f"  [❌ ERRO] Não foi possível colher o filme '{title}' após 3 tentativas.")
+
+def get_post_tmdb_id(post_id: str, url_path: str = None) -> str | None:
+    """Extrai o TMDB ID do post a partir do Set-Cookie seasons_{post_id}."""
+    url = f"{BASE_URL}{url_path}" if url_path else f"{BASE_URL}/posts/animes/post/{post_id}"
     try:
-        p_res = session.post(player_url, json=player_payload, timeout=15)
-        p_data = p_res.json()
-    except Exception as e:
-        print(f"  [-] Erro ao carregar player do filme: {e}")
-        return
+        pr = session.get(url, timeout=12)
+        sc = pr.headers.get("Set-Cookie", "")
+        m = re.search(rf'seasons_{post_id}=([^;]+)', sc)
+        if m:
+            sd = json.loads(urllib.parse.unquote(m.group(1)))
+            if sd and sd[0].get("tmdb"):
+                return str(sd[0].get("tmdb"))
+    except Exception:
+        pass
+    return None
 
-    if not p_data.get("success") or not p_data.get("players"):
-        print(f"  [-] Nenhum stream disponível para o filme '{title}'")
-        return
+def find_smartplay_post(title: str, original_title: str, target_tmdb: str) -> tuple[str, str]:
+    """
+    Localiza o post exato no SmartPlay Lite para um anime.
+    Valida pelo TMDB ID embutido no post para garantir precisão absoluta.
+    """
+    candidate_queries = []
+    c1 = re.sub(r'[\(\)\[\]\-:]+', ' ', title).strip()
+    candidate_queries.append(c1)
+    w1 = c1.split()
+    if len(w1) > 3:
+        candidate_queries.append(' '.join(w1[:3]))
+    if len(w1) > 2:
+        candidate_queries.append(' '.join(w1[:2]))
 
-    video_stream = p_data["players"][0].get("file")
-    clean_slug = re.sub(r'[^a-zA-Z0-9]+', '-', title).strip('-').lower()
-    slug = f"{clean_slug}-filme"
+    if original_title:
+        c2 = re.sub(r'[\(\)\[\]\-:]+', ' ', original_title).strip()
+        candidate_queries.append(c2)
+        w2 = c2.split()
+        if len(w2) > 3:
+            candidate_queries.append(' '.join(w2[:3]))
+        if len(w2) > 2:
+            candidate_queries.append(' '.join(w2[:2]))
 
-    print(f"  ▶ Processando Filme de Animação: {title} (TMDB {tmdb_id})...")
-    process_episode(video_stream, tmdb_id, 1, 1, slug, mode=mode)
-    time.sleep(2)
+    seen = set()
+    queries = []
+    for q in candidate_queries:
+        if q.lower() not in seen and len(q) >= 2:
+            seen.add(q.lower())
+            queries.append(q)
+
+    # 1. Procura com validação de TMDB ID exato
+    for query in queries:
+        prune_cookies()
+        try:
+            s_res = session.get(f"{BASE_URL}/search/1", params={"search": query}, timeout=15)
+            matches = re.findall(r'<a href=\"(/posts/[^/]+/post/(\d+))\".*?<h3><a [^>]*>(.*?)</a></h3>', s_res.text, re.DOTALL)
+            for url_path, pid, m_title in matches:
+                if "/posts/animes/" in url_path or "/posts/filmes/" in url_path:
+                    post_tmdb = get_post_tmdb_id(pid, url_path)
+                    if post_tmdb and str(post_tmdb) == str(target_tmdb):
+                        return pid, m_title.strip()
+        except Exception:
+            continue
+
+    # 2. Fallback de busca caso o TMDB ID não tenha sido extraído do cookie
+    for query in queries[:2]:
+        try:
+            s_res = session.get(f"{BASE_URL}/search/1", params={"search": query}, timeout=15)
+            matches = re.findall(r'<a href=\"(/posts/[^/]+/post/(\d+))\".*?<h3><a [^>]*>(.*?)</a></h3>', s_res.text, re.DOTALL)
+            for url_path, pid, m_title in matches:
+                if "/posts/animes/" in url_path:
+                    return pid, m_title.strip()
+        except Exception:
+            pass
+
+    return None, None
 
 def harvest_anime_post(post_id: str, anime_title: str, mode: str = "direct", target_tmdb: str = None):
     """
     Colhe todas as temporadas e episódios de um post do SmartPlay Lite.
-    Garante que TODOS os episódios faltantes sejam processados.
+    Garante que TODOS os episódios faltantes sejam processados com retentativas e tolerância a falhas.
     """
     prune_cookies(keep_post_id=str(post_id))
     post_url = f"{BASE_URL}/posts/animes/post/{post_id}"
@@ -471,26 +549,39 @@ def harvest_anime_post(post_id: str, anime_title: str, mode: str = "direct", tar
             player_url = f"{BASE_URL}/player/episode"
             player_payload = {"ep_id": str(ep_id), "action_type": "PLAY"}
 
-            try:
-                p_res = session.post(player_url, json=player_payload, timeout=15)
-                p_data = p_res.json()
-            except Exception as e:
-                print(f"      [-] Falha ao obter stream do episódio {ep_id}: {e}")
-                continue
+            # Sistema de Retentativas Inteligente (até 3 tentativas por episódio)
+            success = False
+            for attempt in range(1, 4):
+                try:
+                    p_res = session.post(player_url, json=player_payload, timeout=20)
+                    p_data = p_res.json()
+                    if not p_data.get("success") or not p_data.get("players"):
+                        msg = p_data.get("message", "Sem players disponíveis")
+                        print(f"      [!] [Tentativa {attempt}/3] {msg}. Aguardando retentativa...")
+                        time.sleep(3)
+                        continue
 
-            if not p_data.get("success") or not p_data.get("players"):
-                print(f"      [-] Stream indisponível para episódio {ep_id}")
-                continue
+                    video_stream = p_data["players"][0].get("file")
+                    clean_anime_slug = re.sub(r'[^a-zA-Z0-9]+', '-', anime_title).strip('-').lower()
+                    slug = f"{clean_anime_slug}-s{season_num:02d}e{ep_num:02d}"
 
-            video_stream = p_data["players"][0].get("file")
-            clean_anime_slug = re.sub(r'[^a-zA-Z0-9]+', '-', anime_title).strip('-').lower()
-            slug = f"{clean_anime_slug}-s{season_num:02d}e{ep_num:02d}"
+                    print(f"      ▶ [Tentativa {attempt}/3] Ingerindo T{season_num:02d}E{ep_num:02d}...")
+                    ok = process_episode(video_stream, tmdb_id, season_num, ep_num, slug, mode=mode)
+                    if ok:
+                        existing_eps.add((season_num, ep_num))
+                        success = True
+                        break
+                    else:
+                        print(f"      [-] [Tentativa {attempt}/3] Falha na ingestão do episódio. Retentando...")
+                        time.sleep(3)
+                except Exception as ep_err:
+                    print(f"      [-] [Tentativa {attempt}/3] Erro: {ep_err}")
+                    time.sleep(3)
 
-            print(f"      ▶ Processando T{season_num:02d}E{ep_num:02d}...")
-            ok = process_episode(video_stream, tmdb_id, season_num, ep_num, slug, mode=mode)
-            if ok:
-                existing_eps.add((season_num, ep_num))
-            time.sleep(2)
+            if not success:
+                print(f"      [❌ ERRO] Não foi possível obter ou enviar T{season_num:02d}E{ep_num:02d} após 3 tentativas.")
+
+            time.sleep(1)
 
 def repair_incomplete_animes(mode: str = "direct"):
     """
@@ -508,7 +599,7 @@ def repair_incomplete_animes(mode: str = "direct"):
     }
 
     try:
-        r = requests.get(url, headers=headers, timeout=15)
+        r = session.get(url, headers=headers, timeout=15)
         if r.status_code != 200:
             print(f"[-] Erro ao consultar Supabase: {r.status_code}")
             return
@@ -542,6 +633,7 @@ def repair_incomplete_animes(mode: str = "direct"):
     for anime, total_eps, uploaded_eps, missing in incomplete_list:
         tmdb_id = str(anime.get("tmdb_id"))
         title = anime.get("title", "")
+        original_title = anime.get("original_title", "")
         clean_title = (
             title.replace("&acute;", "´")
             .replace("&ccedil;", "ç")
@@ -551,32 +643,16 @@ def repair_incomplete_animes(mode: str = "direct"):
             .strip()
         )
         print(f"\n⚡ [REPARANDO] {clean_title} (TMDB {tmdb_id})")
-        print(f"   Status: {uploaded_eps}/{total_eps} episódios disponíveis (Faltam {missing} episódios)")
+        print(f"   Status: {uploaded_eps}/{total_eps} episódios no Drive (Faltam {missing} episódios)")
 
-        # Busca no catálogo SmartPlay Lite
-        search_query = re.sub(r'[\(\)\[\]\-:]+', ' ', clean_title).strip()
-        words = search_query.split()
-        short_query = ' '.join(words[:4]) if len(words) > 4 else search_query
-
-        prune_cookies()
-        try:
-            s_res = session.get(f"{BASE_URL}/search/1", params={"search": short_query}, timeout=15)
-            matches = re.findall(r'<a href=\"(/posts/[^/]+/post/(\d+))\".*?<h3><a [^>]*>(.*?)</a></h3>', s_res.text, re.DOTALL)
-        except Exception as e:
-            print(f"   [-] Falha ao buscar no SmartPlay: {e}")
-            continue
-
-        matched_post_id = None
-        for url_path, pid, m_title in matches:
-            if "/posts/animes/" in url_path or "/posts/filmes/" in url_path:
-                matched_post_id = pid
-                break
+        # Localiza o post com correspondência inteligente e validação por TMDB ID
+        matched_post_id, matched_title = find_smartplay_post(clean_title, original_title, tmdb_id)
 
         if not matched_post_id:
-            print(f"   [-] Não encontrado no catálogo SmartPlay Lite via busca '{short_query}'")
+            print(f"   [-] Anime não encontrado no catálogo do SmartPlay Lite.")
             continue
 
-        print(f"   [+] Post encontrado no SmartPlay Lite: #{matched_post_id}. Iniciando colheita de episódios...")
+        print(f"   [+] Post correspondente: #{matched_post_id} ('{matched_title}'). Colhendo episódios faltantes...")
         harvest_anime_post(matched_post_id, clean_title, mode=mode, target_tmdb=tmdb_id)
 
 def crawl_catalog(start_page: int = 1, max_pages: int = 3, mode: str = "direct"):
