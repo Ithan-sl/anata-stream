@@ -152,16 +152,45 @@ def sync_anime(tmdb_id: int) -> str:
     return anime_id
 
 def link_stream_source(tmdb_id: int, season_num: int, episode_num: int, gdrive_file_id: str, file_name: str, file_size: int = 0):
-    """Vincula o arquivo do Google Drive ao episódio correspondente."""
+    \"\"\"Vincula o arquivo do Google Drive ao episódio correspondente com tolerância a falhas.\"\"\"
     supabase = get_supabase()
     
-    # Localiza o ID interno do episódio
-    anime = supabase.table("animes").select("id").eq("tmdb_id", tmdb_id).single().execute()
-    season = supabase.table("seasons").select("id").eq("anime_id", anime.data["id"]).eq("season_number", season_num).single().execute()
-    episode = supabase.table("episodes").select("id").eq("season_id", season.data["id"]).eq("episode_number", episode_num).single().execute()
+    # 1. Localiza ou cria registro do Anime
+    anime_res = supabase.table("animes").select("id").eq("tmdb_id", tmdb_id).execute()
+    if not anime_res.data:
+        anime_id = sync_anime(tmdb_id)
+    else:
+        anime_id = anime_res.data[0]["id"]
+
+    # 2. Localiza ou cria registro da Temporada
+    season_res = supabase.table("seasons").select("id").eq("anime_id", anime_id).eq("season_number", season_num).execute()
+    if not season_res.data:
+        s_payload = {
+            "anime_id": anime_id,
+            "season_number": season_num,
+            "name": f"Temporada {season_num}",
+            "episode_count": 0
+        }
+        s_ins = supabase.table("seasons").upsert(s_payload, on_conflict="anime_id, season_number").execute()
+        season_id = s_ins.data[0]["id"]
+    else:
+        season_id = season_res.data[0]["id"]
+
+    # 3. Localiza ou cria registro do Episódio
+    ep_res = supabase.table("episodes").select("id").eq("season_id", season_id).eq("episode_number", episode_num).execute()
+    if not ep_res.data:
+        ep_payload = {
+            "season_id": season_id,
+            "episode_number": episode_num,
+            "name": f"Episódio {episode_num}"
+        }
+        ep_ins = supabase.table("episodes").upsert(ep_payload, on_conflict="season_id, episode_number").execute()
+        episode_id = ep_ins.data[0]["id"]
+    else:
+        episode_id = ep_res.data[0]["id"]
 
     source_payload = {
-        "episode_id": episode.data["id"],
+        "episode_id": episode_id,
         "storage_provider": "gdrive",
         "gdrive_file_id": gdrive_file_id,
         "file_name": file_name,
@@ -170,7 +199,7 @@ def link_stream_source(tmdb_id: int, season_num: int, episode_num: int, gdrive_f
         "resolution": "1080p"
     }
 
-    existing = supabase.table("media_sources").select("id").eq("episode_id", episode.data["id"]).execute()
+    existing = supabase.table("media_sources").select("id").eq("episode_id", episode_id).execute()
     if existing.data:
         res = supabase.table("media_sources").update(source_payload).eq("id", existing.data[0]["id"]).execute()
         print(f"[+] Mídia atualizada (sem duplicata): Episódio {episode_num} -> GDrive ID {gdrive_file_id}")

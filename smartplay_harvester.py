@@ -103,8 +103,9 @@ def get_existing_episodes_set(tmdb_id: str) -> set:
     }
 
     try:
-        r = session.get(url, headers=headers, timeout=12)
+        r = requests.get(url, headers=headers, timeout=15)
         if r.status_code != 200:
+            print(f"[-] Erro ao consultar Supabase (status {r.status_code}): {r.text}")
             return set()
         data = r.json()
         if not data or not data[0].get("seasons"):
@@ -119,7 +120,8 @@ def get_existing_episodes_set(tmdb_id: str) -> set:
                 if sources and len(sources) > 0:
                     existing.add((s_num, e_num))
         return existing
-    except Exception:
+    except Exception as e:
+        print(f"[-] Exceção ao consultar episódios existentes: {e}")
         return set()
 
 def is_allowed_animation(tmdb_id: str, title: str) -> tuple[bool, str]:
@@ -366,19 +368,54 @@ def get_post_tmdb_id(post_id: str, url_path: str = None) -> str | None:
         pass
     return None
 
-def find_smartplay_post(title: str, original_title: str, target_tmdb: str) -> tuple[str, str]:
+def find_smartplay_post(title: str, original_title: str, target_tmdb: str, extra_hints: list = None) -> tuple[str, str]:
     """
     Localiza o post exato no SmartPlay Lite para um anime.
-    Valida pelo TMDB ID embutido no post para garantir precisão absoluta.
+    Gera múltiplas consultas (título PT, título original, título canônico em inglês no TMDB,
+    títulos alternativos e dicas de arquivos já upados) e valida pelo TMDB ID embutido no post.
     """
     candidate_queries = []
-    c1 = re.sub(r'[\(\)\[\]\-:]+', ' ', title).strip()
-    candidate_queries.append(c1)
-    w1 = c1.split()
-    if len(w1) > 3:
-        candidate_queries.append(' '.join(w1[:3]))
-    if len(w1) > 2:
-        candidate_queries.append(' '.join(w1[:2]))
+    if extra_hints:
+        for h in extra_hints:
+            if h and len(h) >= 3:
+                candidate_queries.append(h)
+
+    if title:
+        c1 = re.sub(r'[\(\)\[\]\-:]+', ' ', title).strip()
+        candidate_queries.append(c1)
+        w1 = c1.split()
+        if len(w1) > 3:
+            candidate_queries.append(' '.join(w1[:3]))
+        if len(w1) > 2:
+            candidate_queries.append(' '.join(w1[:2]))
+
+    # Consulta TMDB para obter o nome canônico em inglês (SmartPlay Lite costuma indexar títulos em inglês)
+    if target_tmdb and target_tmdb != "0":
+        try:
+            tmdb_headers = {"Authorization": f"Bearer {TMDB_TOKEN}", "Accept": "application/json"}
+            tmdb_r = requests.get(f"https://api.themoviedb.org/3/tv/{target_tmdb}", headers=tmdb_headers, timeout=8)
+            if tmdb_r.status_code == 200:
+                t_data = tmdb_r.json()
+                en_name = t_data.get("name")
+                if en_name:
+                    c_en = re.sub(r'[\(\)\[\]\-:]+', ' ', en_name).strip()
+                    candidate_queries.append(c_en)
+                    w_en = c_en.split()
+                    if len(w_en) > 3:
+                        candidate_queries.append(' '.join(w_en[:3]))
+                    if len(w_en) > 2:
+                        candidate_queries.append(' '.join(w_en[:2]))
+            elif tmdb_r.status_code == 404:
+                # Caso filme de animação
+                tmdb_m = requests.get(f"https://api.themoviedb.org/3/movie/{target_tmdb}", headers=tmdb_headers, timeout=8)
+                if tmdb_m.status_code == 200:
+                    m_data = tmdb_m.json()
+                    en_m_name = m_data.get("title")
+                    if en_m_name:
+                        c_en_m = re.sub(r'[\(\)\[\]\-:]+', ' ', en_m_name).strip()
+                        candidate_queries.append(c_en_m)
+        except Exception:
+            pass
 
     if original_title:
         c2 = re.sub(r'[\(\)\[\]\-:]+', ' ', original_title).strip()
@@ -392,9 +429,10 @@ def find_smartplay_post(title: str, original_title: str, target_tmdb: str) -> tu
     seen = set()
     queries = []
     for q in candidate_queries:
-        if q.lower() not in seen and len(q) >= 2:
-            seen.add(q.lower())
-            queries.append(q)
+        q_clean = q.strip()
+        if q_clean.lower() not in seen and len(q_clean) >= 2:
+            seen.add(q_clean.lower())
+            queries.append(q_clean)
 
     # 1. Procura com validação de TMDB ID exato
     for query in queries:
@@ -411,7 +449,7 @@ def find_smartplay_post(title: str, original_title: str, target_tmdb: str) -> tu
             continue
 
     # 2. Fallback de busca caso o TMDB ID não tenha sido extraído do cookie
-    for query in queries[:2]:
+    for query in queries[:3]:
         try:
             s_res = session.get(f"{BASE_URL}/search/1", params={"search": query}, timeout=15)
             matches = re.findall(r'<a href=\"(/posts/[^/]+/post/(\d+))\".*?<h3><a [^>]*>(.*?)</a></h3>', s_res.text, re.DOTALL)
@@ -421,7 +459,41 @@ def find_smartplay_post(title: str, original_title: str, target_tmdb: str) -> tu
         except Exception:
             pass
 
-    return None, None
+def parse_episode_number(ep_label: str, fallback_idx: int) -> int:
+    """Extrai com máxima precisão o número do episódio de qualquer formato textual do SmartPlay Lite."""
+    label = ep_label.strip()
+
+    # 1. S01E05 / T01E05 format
+    m_sxe = re.search(r'[st]\d+\s*e(\d+)', label, re.I)
+    if m_sxe:
+        return int(m_sxe.group(1))
+
+    # 2. Season x Episode: 1x05, 01x12
+    m_sx = re.search(r'\b\d+\s*x\s*(\d+)\b', label, re.I)
+    if m_sx:
+        return int(m_sx.group(1))
+
+    # 3. Explicit episode marker: EP 5, Episódio 12, Cap 3
+    m_ep = re.search(r'(?:epis[oó]dio|cap[ií]tulo|\bep)\s*[:#\.\-]?\s*(\d+)\b', label, re.I)
+    if m_ep:
+        return int(m_ep.group(1))
+
+    # 4. Trailing number at the end of the string: e.g. 'BanG Dream! 05'
+    m_end = re.search(r'\b(\d+)\s*$', label)
+    if m_end:
+        return int(m_end.group(1))
+
+    # 5. Standalone E + number: e.g. 'E05', 'E 5'
+    m_e = re.search(r'\be\s*(\d+)\b', label, re.I)
+    if m_e:
+        return int(m_e.group(1))
+
+    # 6. Any standalone number in string
+    m_any = re.search(r'\b(\d+)\b', label)
+    if m_any:
+        return int(m_any.group(1))
+
+    return fallback_idx
 
 def harvest_anime_post(post_id: str, anime_title: str, mode: str = "direct", target_tmdb: str = None):
     """
@@ -533,18 +605,13 @@ def harvest_anime_post(post_id: str, anime_title: str, mode: str = "direct", tar
 
         for ep_idx, (ep_id, ep_label) in enumerate(pattern, 1):
             ep_label = ep_label.strip()
-            ep_match = re.search(r'(\d+)x(\d+)', ep_label)
-            if ep_match:
-                ep_num = int(ep_match.group(2))
-            else:
-                num_only = re.search(r'(?:ep|episodio|\b)(\d+)\b', ep_label, re.IGNORECASE)
-                ep_num = int(num_only.group(1)) if num_only else ep_idx
+            ep_num = parse_episode_number(ep_label, ep_idx)
 
             if (season_num, ep_num) in existing_eps:
                 print(f"    [✓ Já no Drive] T{season_num:02d}E{ep_num:02d} - Ignorado.")
                 continue
 
-            print(f"    [⚡ LACUNA DETECTADA] T{season_num:02d}E{ep_num:02d} não encontrado no banco. Baixando...")
+            print(f"    [⚡ LACUNA DETECTADA] T{season_num:02d}E{ep_num:02d} ({ep_label}) não encontrado no banco. Baixando...")
 
             player_url = f"{BASE_URL}/player/episode"
             player_payload = {"ep_id": str(ep_id), "action_type": "PLAY"}
@@ -592,21 +659,21 @@ def repair_incomplete_animes(mode: str = "direct"):
     print("  ANATA STREAM — AUDITORIA & REPARAÇÃO DE LACUNAS NO BANCO")
     print("================================================================\n")
 
-    url = f"{SUPABASE_URL}/rest/v1/animes?select=id,tmdb_id,title,original_title,seasons(id,season_number,episodes(id,episode_number,media_sources(id,gdrive_file_id)))"
+    url = f"{SUPABASE_URL}/rest/v1/animes?select=id,tmdb_id,title,original_title,seasons(id,season_number,episodes(id,episode_number,media_sources(id,file_name,gdrive_file_id)))"
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}"
     }
 
     try:
-        r = session.get(url, headers=headers, timeout=15)
+        r = requests.get(url, headers=headers, timeout=25)
         if r.status_code != 200:
-            print(f"[-] Erro ao consultar Supabase: {r.status_code}")
-            return
+            print(f"[-] Erro fatal ao consultar Supabase (status {r.status_code}): {r.text}")
+            sys.exit(1)
         animes = r.json()
     except Exception as e:
-        print(f"[-] Erro de conexão com Supabase: {e}")
-        return
+        print(f"[-] Erro fatal de conexão com Supabase: {e}")
+        sys.exit(1)
 
     print(f"[*] Auditando {len(animes)} animes cadastrados no Supabase...\n")
 
@@ -620,8 +687,8 @@ def repair_incomplete_animes(mode: str = "direct"):
             1 for s in seasons for ep in s.get("episodes", [])
             if ep.get("media_sources") and len(ep["media_sources"]) > 0
         )
-        if total_eps > 0 and uploaded_eps < total_eps:
-            missing = total_eps - uploaded_eps
+        if total_eps == 0 or uploaded_eps < total_eps:
+            missing = (total_eps - uploaded_eps) if total_eps > 0 else 0
             incomplete_list.append((a, total_eps, uploaded_eps, missing))
 
     if not incomplete_list:
@@ -645,8 +712,20 @@ def repair_incomplete_animes(mode: str = "direct"):
         print(f"\n⚡ [REPARANDO] {clean_title} (TMDB {tmdb_id})")
         print(f"   Status: {uploaded_eps}/{total_eps} episódios no Drive (Faltam {missing} episódios)")
 
+        # Extrai pistas de nomes de arquivos anteriores para busca precisa no SmartPlay
+        extra_hints = []
+        for s in anime.get("seasons", []):
+            for ep in s.get("episodes", []):
+                for m in ep.get("media_sources", []):
+                    fname = m.get("file_name", "")
+                    slug_match = re.match(r'^(.*?)-s\d+e\d+', fname, re.I)
+                    if slug_match:
+                        h = slug_match.group(1).replace('-', ' ').strip()
+                        if h and h not in extra_hints:
+                            extra_hints.append(h)
+
         # Localiza o post com correspondência inteligente e validação por TMDB ID
-        matched_post_id, matched_title = find_smartplay_post(clean_title, original_title, tmdb_id)
+        matched_post_id, matched_title = find_smartplay_post(clean_title, original_title, tmdb_id, extra_hints=extra_hints)
 
         if not matched_post_id:
             print(f"   [-] Anime não encontrado no catálogo do SmartPlay Lite.")
