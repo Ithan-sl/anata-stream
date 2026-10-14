@@ -152,7 +152,7 @@ def sync_anime(tmdb_id: int) -> str:
     return anime_id
 
 def link_stream_source(tmdb_id: int, season_num: int, episode_num: int, gdrive_file_id: str, file_name: str, file_size: int = 0):
-    \"\"\"Vincula o arquivo do Google Drive ao episódio correspondente com tolerância a falhas.\"\"\"
+    """Vincula o arquivo do Google Drive ao episódio correspondente com tolerância a falhas."""
     supabase = get_supabase()
     
     # 1. Localiza ou cria registro do Anime

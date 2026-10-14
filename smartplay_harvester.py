@@ -426,6 +426,12 @@ def find_smartplay_post(title: str, original_title: str, target_tmdb: str, extra
         if len(w2) > 2:
             candidate_queries.append(' '.join(w2[:2]))
 
+    # Adiciona palavras-chave individuais relevantes (>= 5 letras) para capturar títulos longos
+    for word in (title or '').split():
+        clean_w = re.sub(r'[^a-zA-Z0-9]+', '', word)
+        if len(clean_w) >= 5 and clean_w.lower() not in ["season", "series", "episodio", "episode"]:
+            candidate_queries.append(clean_w)
+
     seen = set()
     queries = []
     for q in candidate_queries:
@@ -437,27 +443,35 @@ def find_smartplay_post(title: str, original_title: str, target_tmdb: str, extra
     # 1. Procura com validação de TMDB ID exato
     for query in queries:
         prune_cookies()
-        try:
-            s_res = session.get(f"{BASE_URL}/search/1", params={"search": query}, timeout=15)
-            matches = re.findall(r'<a href=\"(/posts/[^/]+/post/(\d+))\".*?<h3><a [^>]*>(.*?)</a></h3>', s_res.text, re.DOTALL)
-            for url_path, pid, m_title in matches:
-                if "/posts/animes/" in url_path or "/posts/filmes/" in url_path:
-                    post_tmdb = get_post_tmdb_id(pid, url_path)
-                    if post_tmdb and str(post_tmdb) == str(target_tmdb):
-                        return pid, m_title.strip()
-        except Exception:
-            continue
+        for retry in range(2):
+            try:
+                s_res = session.get(f"{BASE_URL}/search/1", params={"search": query}, timeout=20)
+                matches = re.findall(r'<a href=\"(/posts/[^/]+/post/(\d+))\".*?<h3><a [^>]*>(.*?)</a></h3>', s_res.text, re.DOTALL)
+                for url_path, pid, m_title in matches:
+                    if "/posts/animes/" in url_path or "/posts/filmes/" in url_path:
+                        post_tmdb = get_post_tmdb_id(pid, url_path)
+                        if post_tmdb and str(post_tmdb) == str(target_tmdb):
+                            return pid, m_title.strip()
+                break
+            except Exception:
+                time.sleep(2)
+                continue
 
     # 2. Fallback de busca caso o TMDB ID não tenha sido extraído do cookie
     for query in queries[:3]:
-        try:
-            s_res = session.get(f"{BASE_URL}/search/1", params={"search": query}, timeout=15)
-            matches = re.findall(r'<a href=\"(/posts/[^/]+/post/(\d+))\".*?<h3><a [^>]*>(.*?)</a></h3>', s_res.text, re.DOTALL)
-            for url_path, pid, m_title in matches:
-                if "/posts/animes/" in url_path:
-                    return pid, m_title.strip()
-        except Exception:
-            pass
+        for retry in range(2):
+            try:
+                s_res = session.get(f"{BASE_URL}/search/1", params={"search": query}, timeout=20)
+                matches = re.findall(r'<a href=\"(/posts/[^/]+/post/(\d+))\".*?<h3><a [^>]*>(.*?)</a></h3>', s_res.text, re.DOTALL)
+                for url_path, pid, m_title in matches:
+                    if "/posts/animes/" in url_path:
+                        return pid, m_title.strip()
+                break
+            except Exception:
+                time.sleep(2)
+                continue
+
+    return None, None
 
 def parse_episode_number(ep_label: str, fallback_idx: int) -> int:
     """Extrai com máxima precisão o número do episódio de qualquer formato textual do SmartPlay Lite."""
@@ -620,12 +634,12 @@ def harvest_anime_post(post_id: str, anime_title: str, mode: str = "direct", tar
             success = False
             for attempt in range(1, 4):
                 try:
-                    p_res = session.post(player_url, json=player_payload, timeout=20)
+                    p_res = session.post(player_url, json=player_payload, timeout=30)
                     p_data = p_res.json()
                     if not p_data.get("success") or not p_data.get("players"):
                         msg = p_data.get("message", "Sem players disponíveis")
                         print(f"      [!] [Tentativa {attempt}/3] {msg}. Aguardando retentativa...")
-                        time.sleep(3)
+                        time.sleep(attempt * 3)
                         continue
 
                     video_stream = p_data["players"][0].get("file")
@@ -640,10 +654,10 @@ def harvest_anime_post(post_id: str, anime_title: str, mode: str = "direct", tar
                         break
                     else:
                         print(f"      [-] [Tentativa {attempt}/3] Falha na ingestão do episódio. Retentando...")
-                        time.sleep(3)
+                        time.sleep(attempt * 3)
                 except Exception as ep_err:
                     print(f"      [-] [Tentativa {attempt}/3] Erro: {ep_err}")
-                    time.sleep(3)
+                    time.sleep(attempt * 3)
 
             if not success:
                 print(f"      [❌ ERRO] Não foi possível obter ou enviar T{season_num:02d}E{ep_num:02d} após 3 tentativas.")
@@ -725,7 +739,8 @@ def repair_incomplete_animes(mode: str = "direct"):
                             extra_hints.append(h)
 
         # Localiza o post com correspondência inteligente e validação por TMDB ID
-        matched_post_id, matched_title = find_smartplay_post(clean_title, original_title, tmdb_id, extra_hints=extra_hints)
+        post_match = find_smartplay_post(clean_title, original_title, tmdb_id, extra_hints=extra_hints)
+        matched_post_id, matched_title = post_match if (post_match and len(post_match) == 2) else (None, None)
 
         if not matched_post_id:
             print(f"   [-] Anime não encontrado no catálogo do SmartPlay Lite.")
