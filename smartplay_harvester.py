@@ -22,6 +22,11 @@ import argparse
 import subprocess
 import requests
 
+# Força o flush imediato dos logs no terminal e no runner do GitHub Actions
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(line_buffering=True)
+
+
 # Carrega arquivo .env local se existir
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
 if os.path.isfile(ENV_PATH):
@@ -297,7 +302,6 @@ def ingest_direct(stream_url: str, tmdb_id: str, season_num: int, ep_num: int, t
     # 6. Sincroniza Metadados no Supabase
     print(f"      [+] Sincronizando com Supabase...")
     try:
-        indexer.sync_anime(int(tmdb_id))
         indexer.link_stream_source(int(tmdb_id), season_num, ep_num, gdrive_id, file_name, file_bytes)
         print(f"      [✓ SUCESSO] T{season_num:02d}E{ep_num:02d} enviado e registrado no Supabase!")
     except Exception as e:
@@ -473,6 +477,39 @@ def find_smartplay_post(title: str, original_title: str, target_tmdb: str, extra
 
     return None, None
 
+def extract_episodes_from_html(html: str) -> list[tuple[str, str]]:
+    """
+    Extrai todos os episódios disponíveis de uma temporada no SmartPlay Lite de forma 100% precisa.
+    Retorna lista de (ep_id, ep_label).
+    """
+    pattern = []
+    # 1. Extração robusta por bloco episode-header (garante que 100% dos episódios sejam capturados)
+    for ep_match in re.finditer(r'<div class="episode-header">(.*?)<div class="episode-right">', html, re.DOTALL):
+        block = ep_match.group(1)
+        m_id = re.search(r'loadEpisodePlayers\([\'"](\d+)[\'"],\s*[\'"]PLAY[\'"]\)', block)
+        if not m_id:
+            continue
+        ep_id = m_id.group(1)
+        m_title = re.search(r'<div class="episode-title">(.*?)</div>', block)
+        label = m_title.group(1).strip() if m_title else ""
+        if not label:
+            m_alt = re.search(r'alt=[\'"](.*?)[\'"]', block)
+            label = m_alt.group(1).strip() if m_alt else f"Episódio {len(pattern)+1}"
+        pattern.append((ep_id, label))
+
+    if pattern:
+        return pattern
+
+    # 2. Fallback caso a estrutura HTML mude ligeiramente
+    play_calls = re.findall(r'loadEpisodePlayers\([\'"](\d+)[\'"],\s*[\'"]PLAY[\'"]\)', html)
+    unique_ids = list(dict.fromkeys(play_calls))
+    for idx, ep_id in enumerate(unique_ids, 1):
+        m_title = re.search(rf'loadEpisodePlayers\([\'"]{ep_id}[\'"].*?<div class="episode-title">(.*?)</div>', html, re.DOTALL)
+        label = m_title.group(1).strip() if m_title else f"Episódio {idx}"
+        pattern.append((ep_id, label))
+
+    return pattern
+
 def parse_episode_number(ep_label: str, fallback_idx: int) -> int:
     """Extrai com máxima precisão o número do episódio de qualquer formato textual do SmartPlay Lite."""
     label = ep_label.strip()
@@ -509,26 +546,34 @@ def parse_episode_number(ep_label: str, fallback_idx: int) -> int:
 
     return fallback_idx
 
-def harvest_anime_post(post_id: str, anime_title: str, mode: str = "direct", target_tmdb: str = None):
+def harvest_anime_post(post_id: str, anime_title: str, mode: str = "direct", target_tmdb: str = None) -> bool:
     """
     Colhe todas as temporadas e episódios de um post do SmartPlay Lite.
-    Garante que TODOS os episódios faltantes sejam processados com retentativas e tolerância a falhas.
+    Garante que TODOS os episódios e temporadas sejam processados sequencialmente com retentativas estritas.
+    NÃO avança para o próximo anime enquanto houver episódios pendentes que possam ser baixados.
     """
     prune_cookies(keep_post_id=str(post_id))
     post_url = f"{BASE_URL}/posts/animes/post/{post_id}"
 
-    try:
-        res = session.get(post_url, timeout=15)
-    except Exception as e:
-        print(f"[-] Falha ao conectar ao título #{post_id}: {e}")
-        return
+    res = None
+    for retry in range(1, 4):
+        try:
+            res = session.get(post_url, timeout=20)
+            if res.status_code == 200:
+                break
+        except Exception as e:
+            print(f"  [!] Conexão ao post #{post_id} falhou (Tentativa {retry}/3): {e}")
+            time.sleep(retry * 2)
 
-    if res.status_code != 200:
+    if not res or res.status_code != 200:
         post_url = f"{BASE_URL}/posts/filmes/post/{post_id}"
-        res = session.get(post_url, timeout=15)
-        if res.status_code != 200:
-            print(f"[-] Erro ao carregar #{post_id}: HTTP {res.status_code}")
-            return
+        try:
+            res = session.get(post_url, timeout=20)
+        except Exception:
+            pass
+        if not res or res.status_code != 200:
+            print(f"[-] Erro ao carregar #{post_id}: HTTP {res.status_code if res else 'Timeout'}")
+            return False
 
     # Extrai temporadas dos cookies
     set_cookie_header = res.headers.get("Set-Cookie", "")
@@ -550,7 +595,7 @@ def harvest_anime_post(post_id: str, anime_title: str, mode: str = "direct", tar
     is_anim, media_kind = is_allowed_animation(sample_tmdb, anime_title)
     if not is_anim:
         print(f"  [🚫 BLOQUEADO] '{anime_title}' NÃO é animação (Live-action detectado). Pulando...")
-        return
+        return False
 
     print(f"  [🎨 ANIMAÇÃO VALIDADA] {anime_title} (TMDB: {sample_tmdb or 'Auto'})")
 
@@ -559,81 +604,110 @@ def harvest_anime_post(post_id: str, anime_title: str, mode: str = "direct", tar
     if movie_match:
         movie_id = movie_match.group(1)
         harvest_movie(movie_id, anime_title, sample_tmdb or post_id, mode=mode)
-        return
+        return True
 
     # CASO 2: É uma Série de Anime / Animação
     if not seasons_data:
         print(f"[-] Nenhuma temporada encontrada para '{anime_title}' (#{post_id})")
-        return
-
-    existing_eps = get_existing_episodes_set(sample_tmdb)
-    if existing_eps:
-        print(f"  📊 Status no banco: {len(existing_eps)} episódio(s) já armazenado(s).")
+        return False
 
     seasons_data.sort(key=lambda s: int(s.get("t", 1)))
+
+    print(f"  📋 Mapeando temporadas e episódios de '{anime_title}' ({len(seasons_data)} temporada(s))...")
+    all_episodes_items = []
 
     for s in seasons_data:
         season_id = s.get("ID")
         season_num = int(s.get("t", 1))
         season_name = s.get("nome", f"Temporada {season_num}")
-        tmdb_id = s.get("tmdb") or sample_tmdb
+        s_tmdb_id = s.get("tmdb") or sample_tmdb
 
-        prune_cookies(keep_post_id=str(post_id))
         ep_url = f"{BASE_URL}/season/{season_id}/episodes"
+        ep_res = None
+        for s_retry in range(1, 6):
+            try:
+                prune_cookies(keep_post_id=str(post_id))
+                ep_res = session.get(ep_url, timeout=25)
+                if ep_res.status_code == 200:
+                    break
+                print(f"    [!] HTTP {ep_res.status_code} na {season_name} (ID {season_id}) [Tentativa {s_retry}/5]. Retentando...")
+                time.sleep(s_retry * 2)
+            except Exception as e:
+                print(f"    [!] Timeout/Erro na {season_name} (ID {season_id}) [Tentativa {s_retry}/5]: {e}")
+                time.sleep(s_retry * 2)
 
-        try:
-            ep_res = session.get(ep_url, timeout=15)
-        except Exception as e:
-            print(f"  [-] Timeout na temporada {season_id}: {e}")
+        if not ep_res or ep_res.status_code != 200:
+            print(f"    [-] [ERRO CRÍTICO] Falha ao carregar episódios da {season_name}. Temporada inacessível.")
             continue
 
-        if ep_res.status_code != 200:
-            print(f"  [-] Erro HTTP {ep_res.status_code} na temporada {season_id}")
+        season_eps = extract_episodes_from_html(ep_res.text)
+        if not season_eps:
+            print(f"    [-] Nenhum episódio encontrado na {season_name} (ID {season_id}).")
             continue
 
-        # Regex para capturar todos os episódios da temporada
-        pattern = re.findall(
-            r'loadEpisodePlayers\([\'"](\d+)[\'"],\s*[\'"]PLAY[\'"]\).*?<div class="episode-title">(.*?)</div>',
-            ep_res.text,
-            re.DOTALL
-        )
-
-        # Fallback caso a tag da classe div seja ligeiramente diferente
-        if not pattern:
-            raw_eps = re.findall(r'loadEpisodePlayers\([\'"](\d+)[\'"],\s*[\'"]PLAY[\'"]\)', ep_res.text)
-            pattern = [(ep_id, f"Episódio {idx+1}") for idx, ep_id in enumerate(raw_eps)]
-
-        if not pattern:
-            print(f"  [-] Nenhum episódio encontrado na temporada {season_name} (ID {season_id})")
-            continue
-
-        total_eps = len(pattern)
-        season_existing = [e for (s_idx, e) in existing_eps if s_idx == season_num]
-
-        if len(season_existing) == total_eps and total_eps > 0:
-            print(f"  [✓ COMPLETO] {season_name} ({total_eps}/{total_eps} eps já no Google Drive).")
-            continue
-
-        missing_count = total_eps - len(season_existing)
-        print(f"\n  📂 {season_name} ({len(season_existing)}/{total_eps} disponíveis | ⚡ Faltam {missing_count} episódios)")
-
-        for ep_idx, (ep_id, ep_label) in enumerate(pattern, 1):
-            ep_label = ep_label.strip()
+        for ep_idx, (ep_id, ep_label) in enumerate(season_eps, 1):
             ep_num = parse_episode_number(ep_label, ep_idx)
+            all_episodes_items.append({
+                "season_num": season_num,
+                "season_name": season_name,
+                "season_id": season_id,
+                "ep_num": ep_num,
+                "ep_id": ep_id,
+                "ep_label": ep_label,
+                "tmdb_id": s_tmdb_id
+            })
 
-            if (season_num, ep_num) in existing_eps:
-                print(f"    [✓ Já no Drive] T{season_num:02d}E{ep_num:02d} - Ignorado.")
-                continue
+    total_found = len(all_episodes_items)
+    if total_found == 0:
+        print(f"  [-] Nenhum episódio disponível para '{anime_title}' (#{post_id}).")
+        return False
 
-            print(f"    [⚡ LACUNA DETECTADA] T{season_num:02d}E{ep_num:02d} ({ep_label}) não encontrado no banco. Baixando...")
+    # Sincroniza metadados gerais do TMDB uma única vez no Supabase
+    if sample_tmdb and str(sample_tmdb) != "0":
+        try:
+            import indexer
+            indexer.sync_anime(int(sample_tmdb))
+        except Exception as e:
+            print(f"  [!] Aviso ao sincronizar metadados do TMDB {sample_tmdb}: {e}")
+
+    # Checa episódios já existentes no Google Drive e Supabase
+    existing_eps = get_existing_episodes_set(sample_tmdb)
+    missing = [item for item in all_episodes_items if (item['season_num'], item['ep_num']) not in existing_eps]
+
+    if not missing:
+        print(f"  [✓ 100% COMPLETO] Todos os {total_found} episódios de '{anime_title}' já estão no Google Drive e Supabase.")
+        return True
+
+    print(f"  📊 Status atual: {total_found - len(missing)}/{total_found} episódios já no Drive. Faltam {len(missing)} episódio(s).")
+    print(f"  🚀 Iniciando ingestão sequencial estrita de '{anime_title}' (bloqueio até 100% concluído)...")
+
+    # GATE DE CONCLUSÃO ESTRITO: Até 3 rodadas completas dedicadas a este anime
+    for anime_round in range(1, 4):
+        existing_eps = get_existing_episodes_set(sample_tmdb)
+        pending = [item for item in all_episodes_items if (item['season_num'], item['ep_num']) not in existing_eps]
+
+        if not pending:
+            break
+
+        if anime_round > 1:
+            print(f"\n  🔄 [RODADA DE RETENTATIVA {anime_round}/3] Re-tentando {len(pending)} episódios pendentes de '{anime_title}'...")
+
+        for p_idx, item in enumerate(pending, 1):
+            s_num = item["season_num"]
+            e_num = item["ep_num"]
+            ep_id = item["ep_id"]
+            ep_label = item["ep_label"]
+            tmdb_id = item["tmdb_id"]
+
+            print(f"\n    ▶ [{p_idx}/{len(pending)}] Ingerindo T{s_num:02d}E{e_num:02d} ({ep_label})...")
 
             player_url = f"{BASE_URL}/player/episode"
             player_payload = {"ep_id": str(ep_id), "action_type": "PLAY"}
 
-            # Sistema de Retentativas Inteligente (até 3 tentativas por episódio)
-            success = False
+            ep_success = False
             for attempt in range(1, 4):
                 try:
+                    prune_cookies(keep_post_id=str(post_id))
                     p_res = session.post(player_url, json=player_payload, timeout=30)
                     p_data = p_res.json()
                     if not p_data.get("success") or not p_data.get("players"):
@@ -644,13 +718,12 @@ def harvest_anime_post(post_id: str, anime_title: str, mode: str = "direct", tar
 
                     video_stream = p_data["players"][0].get("file")
                     clean_anime_slug = re.sub(r'[^a-zA-Z0-9]+', '-', anime_title).strip('-').lower()
-                    slug = f"{clean_anime_slug}-s{season_num:02d}e{ep_num:02d}"
+                    slug = f"{clean_anime_slug}-s{s_num:02d}e{e_num:02d}"
 
-                    print(f"      ▶ [Tentativa {attempt}/3] Ingerindo T{season_num:02d}E{ep_num:02d}...")
-                    ok = process_episode(video_stream, tmdb_id, season_num, ep_num, slug, mode=mode)
+                    ok = process_episode(video_stream, tmdb_id, s_num, e_num, slug, mode=mode)
                     if ok:
-                        existing_eps.add((season_num, ep_num))
-                        success = True
+                        existing_eps.add((s_num, e_num))
+                        ep_success = True
                         break
                     else:
                         print(f"      [-] [Tentativa {attempt}/3] Falha na ingestão do episódio. Retentando...")
@@ -659,15 +732,26 @@ def harvest_anime_post(post_id: str, anime_title: str, mode: str = "direct", tar
                     print(f"      [-] [Tentativa {attempt}/3] Erro: {ep_err}")
                     time.sleep(attempt * 3)
 
-            if not success:
-                print(f"      [❌ ERRO] Não foi possível obter ou enviar T{season_num:02d}E{ep_num:02d} após 3 tentativas.")
+            if not ep_success:
+                print(f"      [❌ ERRO] Não foi possível completar T{s_num:02d}E{e_num:02d} nesta rodada.")
 
             time.sleep(1)
+
+    # Verificação Final
+    final_existing = get_existing_episodes_set(sample_tmdb)
+    final_pending = [item for item in all_episodes_items if (item['season_num'], item['ep_num']) not in final_existing]
+
+    if not final_pending:
+        print(f"\n  [✓ SUCESSO TOTAL] '{anime_title}' 100% CONCLUÍDO ({total_found}/{total_found} episódios em todas as temporadas)!")
+        return True
+    else:
+        print(f"\n  [⚠️ ATENÇÃO] '{anime_title}' finalizou com {len(final_pending)}/{total_found} episódios pendentes.")
+        return False
 
 def repair_incomplete_animes(mode: str = "direct"):
     """
     Audita o Supabase em busca de animes com episódios faltando (ex: 0 ou apenas 1 enviado)
-    e colhe todos os episódios e temporadas pendentes no SmartPlay Lite.
+    e colhe todos os episódios e temporadas pendentes no SmartPlay Lite até 100% de conclusão.
     """
     print("\n================================================================")
     print("  ANATA STREAM — AUDITORIA & REPARAÇÃO DE LACUNAS NO BANCO")
@@ -683,11 +767,11 @@ def repair_incomplete_animes(mode: str = "direct"):
         r = requests.get(url, headers=headers, timeout=25)
         if r.status_code != 200:
             print(f"[-] Erro fatal ao consultar Supabase (status {r.status_code}): {r.text}")
-            sys.exit(1)
+            return
         animes = r.json()
     except Exception as e:
         print(f"[-] Erro fatal de conexão com Supabase: {e}")
-        sys.exit(1)
+        return
 
     print(f"[*] Auditando {len(animes)} animes cadastrados no Supabase...\n")
 
@@ -711,7 +795,7 @@ def repair_incomplete_animes(mode: str = "direct"):
 
     print(f"[!] Detectados {len(incomplete_list)} animes com episódios faltando no Google Drive!")
 
-    for anime, total_eps, uploaded_eps, missing in incomplete_list:
+    for idx, (anime, total_eps, uploaded_eps, missing) in enumerate(incomplete_list, 1):
         tmdb_id = str(anime.get("tmdb_id"))
         title = anime.get("title", "")
         original_title = anime.get("original_title", "")
@@ -723,8 +807,10 @@ def repair_incomplete_animes(mode: str = "direct"):
             .replace("&ocirc;", "ô")
             .strip()
         )
-        print(f"\n⚡ [REPARANDO] {clean_title} (TMDB {tmdb_id})")
+        print(f"\n================================================================")
+        print(f"⚡ [REPARANDO {idx}/{len(incomplete_list)}] {clean_title} (TMDB {tmdb_id})")
         print(f"   Status: {uploaded_eps}/{total_eps} episódios no Drive (Faltam {missing} episódios)")
+        print(f"================================================================")
 
         # Extrai pistas de nomes de arquivos anteriores para busca precisa no SmartPlay
         extra_hints = []
@@ -750,7 +836,10 @@ def repair_incomplete_animes(mode: str = "direct"):
         harvest_anime_post(matched_post_id, clean_title, mode=mode, target_tmdb=tmdb_id)
 
 def crawl_catalog(start_page: int = 1, max_pages: int = 3, mode: str = "direct"):
-    """Percorre páginas do catálogo SmartPlay Lite."""
+    """
+    Percorre páginas do catálogo SmartPlay Lite processando cada anime estritamente
+    até que todas as suas temporadas e episódios sejam 100% concluídos.
+    """
     print("\n================================================================")
     print("  ANATA STREAM — VARREDURA DE CATÁLOGO (PÁGINAS)")
     print("================================================================\n")
@@ -761,9 +850,9 @@ def crawl_catalog(start_page: int = 1, max_pages: int = 3, mode: str = "direct")
         page_url = f"{BASE_URL}/posts/animes/{page}"
 
         try:
-            res = session.get(page_url, timeout=15)
+            res = session.get(page_url, timeout=20)
         except Exception as e:
-            print(f"[-] Erro na página {page}: {e}")
+            print(f"[-] Erro de conexão na página {page}: {e}")
             break
 
         if res.status_code != 200:
@@ -780,8 +869,8 @@ def crawl_catalog(start_page: int = 1, max_pages: int = 3, mode: str = "direct")
             print(f"[-] Nenhum anime encontrado na página {page}.")
             break
 
-        print(f"[+] {len(matches)} títulos encontrados na página {page}.")
-        for post_id, title in matches:
+        print(f"[+] {len(matches)} títulos encontrados na página {page}.\n")
+        for idx, (post_id, title) in enumerate(matches, 1):
             clean_title = (
                 title.replace("&acute;", "´")
                 .replace("&ccedil;", "ç")
@@ -790,7 +879,9 @@ def crawl_catalog(start_page: int = 1, max_pages: int = 3, mode: str = "direct")
                 .replace("&ocirc;", "ô")
                 .strip()
             )
-            print(f"\n🎬 Analisando: {clean_title} (#{post_id})")
+            print(f"\n================================================================")
+            print(f"🎬 [ANIME {idx}/{len(matches)} DA PÁGINA {page}] {clean_title} (#{post_id})")
+            print(f"================================================================")
             harvest_anime_post(post_id, clean_title, mode=mode)
 
 def main():

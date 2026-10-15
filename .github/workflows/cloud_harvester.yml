@@ -72,6 +72,7 @@ jobs:
 
       - name: Run Harvester in GitHub Cloud (Intelligent Gap Detection & Direct Ingest)
         env:
+          PYTHONUNBUFFERED: "1"
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -79,7 +80,7 @@ jobs:
           RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
         run: |
           echo "[*] Iniciando rastreador inteligente de animes..."
-          python3 smartplay_harvester.py \
+          python3 -u smartplay_harvester.py \
             --action "${{ inputs.action }}" \
             --mode "${{ inputs.ingest_mode }}" \
             --start "${{ inputs.start_page }}" \
