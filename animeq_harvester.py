@@ -8,7 +8,8 @@ Suporta seções:
   - Animes Legendados (/tipo/legendado)
   - Catálogo Geral (/anime)
 
-Garante conclusão estrita de 100% das temporadas e episódios antes de avançar.
+Garante conclusão estrita de 100% das temporadas e episódios, limpeza automática de falhas
+e bypass de loops em streams mortos ou bloqueados (403/404).
 """
 
 import os
@@ -22,6 +23,7 @@ import subprocess
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
+from bs4 import BeautifulSoup
 import socket
 import indexer
 
@@ -170,8 +172,7 @@ def get_existing_episodes_set(tmdb_id: int) -> set:
 def resolve_tmdb(title: str, original_title: str = None, wp_post_id: str = None, is_movie: bool = False, poster_url: str = None) -> int:
     """
     Resolve o TMDB ID oficial pesquisando no TheMovieDB.
-    Se não for encontrado (ex: hentai, doujin ou sem cadastro), gera um TMDB ID sintético único
-    e cadastra diretamente no Supabase sem erros.
+    Se não for encontrado (ex: hentai, doujin ou sem cadastro), gera um TMDB ID sintético único.
     """
     clean_title = re.sub(r'[\(\)\[\]\-:]+', ' ', title).strip()
     search_query = re.sub(r'\b(dublado|legendado|2nd season|season \d+|\d+nd season)\b', '', clean_title, flags=re.I).strip()
@@ -313,7 +314,7 @@ def extract_stream_urls(page_url: str) -> list[str]:
 
 def ingest_direct(stream_url: str, tmdb_id: int, season_num: int, ep_num: int, title_slug: str) -> bool:
     """
-    Executa a ingestão completa no próprio runner.
+    Executa a ingestão direta no runner com ffmpeg (-c copy) e upload Rclone.
     """
     dest_dir = f"gdrive:Animes/{tmdb_id}/Season_{season_num}"
     file_name = f"{title_slug}.mp4"
@@ -364,9 +365,19 @@ def ingest_direct(stream_url: str, tmdb_id: int, season_num: int, ep_num: int, t
         local_temp
     ]
     try:
-        subprocess.run(ffmpeg_cmd, check=True, timeout=360)
+        subprocess.run(ffmpeg_cmd, check=True, timeout=300)
+    except subprocess.CalledProcessError as e:
+        print(f"      [-] Erro no ffmpeg ao baixar stream (exit {e.returncode}): {e}")
+        if os.path.exists(local_temp):
+            os.remove(local_temp)
+        return False
+    except subprocess.TimeoutExpired:
+        print(f"      [-] Timeout no ffmpeg após 300 segundos.")
+        if os.path.exists(local_temp):
+            os.remove(local_temp)
+        return False
     except Exception as e:
-        print(f"      [-] Erro no ffmpeg ao baixar stream: {e}")
+        print(f"      [-] Exceção no ffmpeg: {e}")
         if os.path.exists(local_temp):
             os.remove(local_temp)
         return False
@@ -382,11 +393,14 @@ def ingest_direct(stream_url: str, tmdb_id: int, season_num: int, ep_num: int, t
     print(f"      [*] Enviando via Rclone para {dest_dir} ({file_bytes / (1024*1024):.1f} MB)...")
     rclone_cmd = [
         "rclone", "copy", local_temp, dest_dir,
-        "--drive-chunk-size", "64M",
-        "--transfers", "4"
+        "--drive-chunk-size", "16M",
+        "--transfers", "2",
+        "--timeout", "60s",
+        "--contimeout", "20s",
+        "--low-level-retries", "10"
     ]
     try:
-        subprocess.run(rclone_cmd, check=True, timeout=600)
+        subprocess.run(rclone_cmd, check=True, timeout=300)
     except Exception as e:
         print(f"      [-] Erro no upload via Rclone: {e}")
         if os.path.exists(local_temp):
@@ -469,14 +483,22 @@ def dispatch_to_github(stream_url: str, tmdb_id: int, season_num: int, ep_num: i
             time.sleep(2)
     return False
 
-def process_episode_candidates(stream_candidates: list[str], tmdb_id: int, season_num: int, ep_num: int, title_slug: str, mode: str = "direct") -> bool:
-    """Tenta ingerir o episódio percorrendo todos os streams candidatos disponíveis."""
+def process_episode_candidates(stream_candidates: list[str], tmdb_id: int, season_num: int, ep_num: int, title_slug: str, mode: str = "direct", dead_urls: set = None) -> bool:
+    """Tenta ingerir o episódio percorrendo os streams candidatos com eliminação de URLs mortas."""
     if not stream_candidates:
         print(f"      [!] Nenhum link de vídeo extraído para este episódio.")
         return False
 
-    for idx, stream_url in enumerate(stream_candidates, 1):
-        print(f"      ▶ Testando fonte {idx}/{len(stream_candidates)}: {stream_url[:75]}...")
+    if dead_urls is None:
+        dead_urls = set()
+
+    valid_candidates = [u for u in stream_candidates if u not in dead_urls]
+    if not valid_candidates:
+        print(f"      [!] Todos os links candidatos ({len(stream_candidates)}) já falharam anteriormente.")
+        return False
+
+    for idx, stream_url in enumerate(valid_candidates, 1):
+        print(f"      ▶ Testando fonte {idx}/{len(valid_candidates)}: {stream_url[:75]}...")
         if mode == "direct" and is_rclone_available():
             ok = ingest_direct(stream_url, tmdb_id, season_num, ep_num, title_slug)
         else:
@@ -484,14 +506,15 @@ def process_episode_candidates(stream_candidates: list[str], tmdb_id: int, seaso
 
         if ok:
             return True
-        print(f"      [-] Fonte {idx} falhou. Tentando próxima fonte se disponível...")
+
+        print(f"      [-] Fonte {idx} falhou. Marcando como inativa.")
+        dead_urls.add(stream_url)
 
     return False
 
 def parse_post_episodes(anime_url: str, html: str) -> list[dict]:
     """
     Extrai as temporadas e episódios de uma página do AnimeQ.
-    Suporta filmes (/filme/) e séries com múltiplas temporadas (/anime/).
     """
     is_movie = "/filme/" in anime_url
     if is_movie:
@@ -547,13 +570,8 @@ def parse_post_episodes(anime_url: str, html: str) -> list[dict]:
 def harvest_anime(anime_url: str, anime_title: str, mode: str = "direct", strict: bool = True) -> bool:
     """
     Colhe 100% dos episódios de um anime ou filme do AnimeQ.cloud.
-    Garante bloqueio de conclusão estrita antes de permitir que o crawler avance para o próximo item.
+    Garante limpeza no Supabase em caso de falha de todos os streams e previne loops.
     """
-    print(f"\n================================================================")
-    print(f"🎬 [PROCESSANDO] {anime_title}")
-    print(f"   URL: {anime_url}")
-    print(f"================================================================")
-
     html = None
     for r_try in range(1, 4):
         try:
@@ -570,6 +588,27 @@ def harvest_anime(anime_url: str, anime_title: str, mode: str = "direct", strict
     if not html:
         print(f"  [❌ ERRO] Não foi possível carregar a página de '{anime_title}'.")
         return False
+
+    # Extrai o título canônico da tag <h1> da página específica
+    page_soup = BeautifulSoup(html, "html.parser")
+    h1_tag = page_soup.find("h1")
+    if h1_tag and h1_tag.get_text(strip=True):
+        canonical_title = h1_tag.get_text(strip=True)
+        canonical_title = (
+            canonical_title.replace("&acute;", "´")
+            .replace("&ccedil;", "ç")
+            .replace("&atilde;", "ã")
+            .replace("&eacute;", "é")
+            .replace("&ocirc;", "ô")
+            .strip()
+        )
+        if canonical_title:
+            anime_title = canonical_title
+
+    print(f"\n================================================================")
+    print(f"🎬 [PROCESSANDO] {anime_title}")
+    print(f"   URL: {anime_url}")
+    print(f"================================================================")
 
     is_movie = "/filme/" in anime_url
 
@@ -606,12 +645,13 @@ def harvest_anime(anime_url: str, anime_title: str, mode: str = "direct", strict
         return True
 
     print(f"  📊 Status atual: {total_eps - len(missing)}/{total_eps} episódios já no Drive. Faltam {len(missing)} episódio(s).")
-    print(f"  🚀 Iniciando ingestão sequencial estrita de '{anime_title}'...")
+    print(f"  🚀 Iniciando ingestão sequencial de '{anime_title}'...")
 
     clean_anime_slug = re.sub(r'[^a-zA-Z0-9]+', '-', anime_title).strip('-').lower()
+    dead_urls_cache = set()
 
-    # GATE DE CONCLUSÃO ESTRITO: Até 3 rodadas completas dedicadas a este anime
-    for anime_round in range(1, 4):
+    # Até 2 rodadas dedicadas a este anime
+    for anime_round in range(1, 3):
         existing_eps = get_existing_episodes_set(tmdb_id)
         pending = [ep for ep in episodes if (ep['season_num'], ep['ep_num']) not in existing_eps]
 
@@ -619,7 +659,7 @@ def harvest_anime(anime_url: str, anime_title: str, mode: str = "direct", strict
             break
 
         if anime_round > 1:
-            print(f"\n  🔄 [RODADA DE RETENTATIVA {anime_round}/3] Re-tentando {len(pending)} episódios pendentes de '{anime_title}'...")
+            print(f"\n  🔄 [RODADA DE RETENTATIVA {anime_round}/2] Re-tentando {len(pending)} episódios pendentes de '{anime_title}'...")
 
         for p_idx, ep_item in enumerate(pending, 1):
             s_num = ep_item["season_num"]
@@ -634,22 +674,22 @@ def harvest_anime(anime_url: str, anime_title: str, mode: str = "direct", strict
             candidates = extract_stream_urls(ep_page_url)
 
             success = False
-            for attempt in range(1, 4):
+            for attempt in range(1, 3):
                 try:
-                    if process_episode_candidates(candidates, tmdb_id, s_num, e_num, slug, mode=mode):
+                    if process_episode_candidates(candidates, tmdb_id, s_num, e_num, slug, mode=mode, dead_urls=dead_urls_cache):
                         existing_eps.add((s_num, e_num))
                         success = True
                         break
                     else:
-                        print(f"      [!] [Tentativa {attempt}/3] Falha na ingestão. Re-extraindo streams da página...")
-                        time.sleep(attempt * 2)
-                        candidates = extract_stream_urls(ep_page_url)
+                        if attempt < 2:
+                            print(f"      [!] [Tentativa {attempt}/2] Falha na ingestão. Verificando alternativas...")
+                            time.sleep(2)
                 except Exception as ep_err:
-                    print(f"      [-] [Tentativa {attempt}/3] Erro no episódio: {ep_err}")
-                    time.sleep(attempt * 2)
+                    print(f"      [-] [Tentativa {attempt}/2] Erro no episódio: {ep_err}")
+                    time.sleep(2)
 
             if not success:
-                print(f"      [❌ ERRO] Não foi possível completar T{s_num:02d}E{e_num:02d} nesta rodada.")
+                print(f"      [❌ ERRO] Não foi possível completar T{s_num:02d}E{e_num:02d}.")
 
             time.sleep(1)
 
@@ -658,16 +698,28 @@ def harvest_anime(anime_url: str, anime_title: str, mode: str = "direct", strict
     final_pending = [ep for ep in episodes if (ep['season_num'], ep['ep_num']) not in final_existing]
 
     if not final_pending:
-        print(f"\n  [✓ SUCESSO TOTAL] '{anime_title}' 100% CONCLUÍDO ({total_eps}/{total_eps} episódios em todas as temporadas)!")
+        print(f"\n  [✓ SUCESSO TOTAL] '{anime_title}' 100% CONCLUÍDO ({total_eps}/{total_eps} episódios)!")
         return True
     else:
         print(f"\n  [⚠️ ATENÇÃO] '{anime_title}' finalizou com {len(final_pending)}/{total_eps} episódios pendentes.")
-        if strict:
-            print(f"  [⛔ BLOQUEIO DE SEGURANÇA ESTRITO] Interrompendo varredura para NUNCA pular episódios!")
-            return False
+        
+        # Se NENHUM episódio deste anime/filme foi concluído, remove o registro do Supabase
+        # para nunca deixar animes fantasmas ou vazios no banco
+        if not final_existing:
+            print(f"  [🧹 LIMPEZA AUTOMÁTICA] Nenhum episódio de '{anime_title}' pôde ser baixado. Purgando registro vazio do Supabase...")
+            try:
+                requests.delete(
+                    f"{SUPABASE_URL}/rest/v1/animes?tmdb_id=eq.{tmdb_id}",
+                    headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                    timeout=10
+                )
+                print(f"  [✓] Registro de '{anime_title}' removido com sucesso do Supabase.")
+            except Exception as del_err:
+                print(f"  [-] Erro ao limpar registro do Supabase: {del_err}")
+
         return False
 
-def crawl_section(section_name: str, start_page: int = 1, max_pages: int = 3, mode: str = "direct", strict: bool = True) -> bool:
+def crawl_section(section_name: str, start_page: int = 1, max_pages: int = 3, mode: str = "direct", strict: bool = False) -> bool:
     """
     Percorre as páginas de uma seção específica do AnimeQ.cloud e ingere todos os animes.
     """
@@ -701,26 +753,36 @@ def crawl_section(section_name: str, start_page: int = 1, max_pages: int = 3, mo
             print(f"[-] Falha ao obter conteúdo da página {page}. Pulando...")
             continue
 
+        # Extração limpa dos cards via BeautifulSoup para evitar captura de headers da página
+        soup = BeautifulSoup(html, "html.parser")
         items = []
-        article_matches = re.findall(
-            r'<article[^>]+class=[\'"][^\'"]*item[^\'"]*[\'"][^>]*>.*?<a[^>]+href=[\'"]([^\'"]+)[\'"].*?(?:<h3>|<div class=[\'"]title[\'"]>|<h2[^>]*>)(?:<a[^>]*>)?([^<]+)',
-            html,
-            re.DOTALL
-        )
 
-        for href, title in article_matches:
-            if "/anime/" in href or "/filme/" in href:
-                clean_title = (
-                    title.replace("&acute;", "´")
-                    .replace("&ccedil;", "ç")
-                    .replace("&atilde;", "ã")
-                    .replace("&eacute;", "é")
-                    .replace("&ocirc;", "ô")
-                    .strip()
-                )
-                full_href = href if href.startswith("http") else f"{BASE_URL}{href}"
-                if not any(full_href == it[0] for it in items):
-                    items.append((full_href, clean_title))
+        for art in soup.select("article.item, .items article"):
+            a_tag = art.find("a", href=True)
+            if not a_tag:
+                continue
+            href = a_tag["href"]
+            if not ("/anime/" in href or "/filme/" in href):
+                continue
+            
+            t_tag = art.select_one(".data h3, .data .title, h3, .title")
+            title = t_tag.get_text(strip=True) if t_tag else (a_tag.get("title") or "")
+            if not title:
+                img = art.find("img", alt=True)
+                title = img["alt"] if img else ""
+
+            clean_title = (
+                title.replace("&acute;", "´")
+                .replace("&ccedil;", "ç")
+                .replace("&atilde;", "ã")
+                .replace("&eacute;", "é")
+                .replace("&ocirc;", "ô")
+                .strip()
+            )
+
+            full_href = href if href.startswith("http") else f"{BASE_URL}{href}"
+            if clean_title and not any(full_href == it[0] for it in items):
+                items.append((full_href, clean_title))
 
         if not items:
             print(f"[-] Nenhum título encontrado na página {page}.")
@@ -732,7 +794,7 @@ def crawl_section(section_name: str, start_page: int = 1, max_pages: int = 3, mo
             print(f"\n--- [Item {idx}/{len(items)} da Página {page}] ---")
             ok = harvest_anime(item_url, item_title, mode=mode, strict=strict)
             if not ok and strict:
-                print(f"  [⛔ BLOQUEIO DE SEGURANÇA] Interrompendo execução para impedir animes incompletos no banco.")
+                print(f"  [⛔ BLOQUEIO DE SEGURANÇA ESTRITO] Interrompendo execução para impedir avanços com falha.")
                 return False
 
     return True
@@ -822,7 +884,7 @@ def main():
                         help="Modo de processamento: direct (no próprio runner) ou dispatch (GitHub Actions)")
     parser.add_argument("--start", type=int, default=1, help="Página inicial")
     parser.add_argument("--pages", type=int, default=3, help="Total de páginas por seção")
-    parser.add_argument("--no-strict", action="store_true", help="Desativa o bloqueio estrito de avanço de animes incompletos")
+    parser.add_argument("--strict", action="store_true", help="Ativa interrupção imediata da varredura caso um anime falhe")
 
     args = parser.parse_args()
 
@@ -834,17 +896,15 @@ def main():
     if not check_supabase_health():
         sys.exit(1)
 
-    strict_mode = not args.no_strict
-
     if args.action in ["all", "repair"]:
         repair_incomplete_animes(mode=args.mode)
 
     if args.action in ["all", "crawl"]:
         sections_to_crawl = ["filme", "hentai", "dublado", "legendado"] if args.section == "all" else [args.section]
         for sec in sections_to_crawl:
-            ok = crawl_section(sec, start_page=args.start, max_pages=args.pages, mode=args.mode, strict=strict_mode)
-            if not ok and strict_mode:
-                print(f"[!] Execução interrompida na seção {sec} devido ao bloqueio estrito de segurança.")
+            ok = crawl_section(sec, start_page=args.start, max_pages=args.pages, mode=args.mode, strict=args.strict)
+            if not ok and args.strict:
+                print(f"[!] Execução interrompida na seção {sec} devido ao bloqueio estrito.")
                 sys.exit(1)
 
     print("\n[✓] Execução do AnimeQ Harvester concluída com sucesso!")

@@ -1,11 +1,11 @@
 /**
  * Cloudflare Worker: Anata Stream Portal — Interface de Reprodução Dedicada (Cinema Mode)
  * Recursos:
- *  - Página de reprodução individual (não é modal/banner) com suporte a nova aba
- *  - Player ArtPlayer com modo cinema, iluminação ambiente e botões Próximo / Anterior
- *  - Roteamento SPA nativo via hash (#/watch/tmdb_id/temporada/episodio)
- *  - Catálogo de temporadas e episódios organizado em painel lateral/inferior
- *  - Proxy Google Drive com Range HTTP & bypass de vírus
+ *  - Diferenciação visual e estrutural entre FILMES e SÉRIES (Badges, controles e player ajustados)
+ *  - Player ArtPlayer com modo cinema, iluminação ambiente e suporte a mobile
+ *  - Proxy Google Drive com Range HTTP, auto-resolução do token 'uuid' contra aviso de vírus de arquivos >100MB
+ *  - Suporte a reprodução direta de stream mesmo enquanto o Google Drive processa o vídeo
+ *  - Botão de link direto para download / player externo (VLC / navegador nativo)
  */
 
 export default {
@@ -16,14 +16,14 @@ export default {
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-      "Access-Control-Allow-Headers": "Range, Content-Type",
+      "Access-Control-Allow-Headers": "Range, Content-Type, Accept-Ranges",
     };
 
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // 1. Interface Web Principal (SPA com tela de reprodução dedicada)
+    // 1. Interface Web Principal (SPA)
     if (path === "/" || path === "/index.html" || path.startsWith("/watch")) {
       return handleFrontend(url.origin);
     }
@@ -62,7 +62,7 @@ function handleFrontend(origin) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Anata Stream — Portal de Animes</title>
+  <title>Anata Stream — Portal de Animes e Filmes</title>
   <!-- ArtPlayer Engine (Open-Source, Mobile-First) -->
   <script src="https://cdn.jsdelivr.net/npm/artplayer/dist/artplayer.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -140,7 +140,35 @@ function handleFrontend(origin) {
       font-size: 0.85rem;
     }
 
-    /* === VISTA 1: CATÁLOGO DE ANIMES === */
+    /* BADGES */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.68rem;
+      font-weight: 700;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+    .badge-movie {
+      background: rgba(245, 158, 11, 0.2);
+      color: #fbbf24;
+      border: 1px solid rgba(245, 158, 11, 0.4);
+    }
+    .badge-series {
+      background: rgba(225, 29, 72, 0.2);
+      color: #fb7185;
+      border: 1px solid rgba(225, 29, 72, 0.4);
+    }
+    .badge-hentai {
+      background: rgba(168, 85, 247, 0.2);
+      color: #c084fc;
+      border: 1px solid rgba(168, 85, 247, 0.4);
+    }
+
+    /* === VISTA 1: CATÁLOGO DE ANIMES E FILMES === */
     #catalogView {
       padding: 1.5rem;
       max-width: 1400px;
@@ -153,6 +181,9 @@ function handleFrontend(origin) {
       font-weight: 700;
       margin-bottom: 1.25rem;
       color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
     }
     .anime-grid {
       display: grid;
@@ -173,6 +204,8 @@ function handleFrontend(origin) {
       border: 1px solid var(--border);
       cursor: pointer;
       transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
+      display: flex;
+      flex-direction: column;
     }
     .anime-card:hover {
       transform: translateY(-4px);
@@ -191,7 +224,7 @@ function handleFrontend(origin) {
       width: 100%; height: 100%;
       object-fit: cover;
     }
-    .card-info { padding: 0.75rem; }
+    .card-info { padding: 0.75rem; flex: 1; display: flex; flex-direction: column; justify-content: space-between; }
     .card-title {
       font-size: 0.88rem;
       font-weight: 600;
@@ -202,8 +235,9 @@ function handleFrontend(origin) {
     .card-meta {
       font-size: 0.75rem;
       color: var(--text-muted);
-      margin-top: 0.3rem;
+      margin-top: 0.4rem;
       display: flex;
+      align-items: center;
       justify-content: space-between;
     }
 
@@ -252,24 +286,25 @@ function handleFrontend(origin) {
       margin-bottom: 1.25rem;
     }
     #artplayer-container { width: 100%; height: 100%; }
+    
     .watch-details {
       display: flex;
-      align-items: flex-start;
+      align-items: center;
       justify-content: space-between;
       gap: 1.5rem;
-      margin-bottom: 1.5rem;
+      margin-bottom: 1.25rem;
       flex-wrap: wrap;
     }
     .anime-headline h1 {
-      font-size: 1.4rem;
+      font-size: 1.35rem;
       font-weight: 800;
       color: #fff;
-      margin-bottom: 0.3rem;
     }
     .anime-headline p {
-      font-size: 0.95rem;
+      font-size: 0.92rem;
       color: var(--accent);
       font-weight: 600;
+      margin-top: 0.2rem;
     }
     .ep-nav-controls {
       display: flex;
@@ -297,6 +332,27 @@ function handleFrontend(origin) {
       opacity: 0.35;
       cursor: not-allowed;
     }
+
+    .direct-download-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.55rem 1rem;
+      background: #1e2235;
+      color: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .direct-download-btn:hover {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+
     .season-tabs {
       display: flex;
       gap: 0.5rem;
@@ -373,6 +429,7 @@ function handleFrontend(origin) {
       .theater-container { border-radius: 0; margin-left: -1rem; margin-right: -1rem; width: calc(100% + 2rem); }
       #watchView { padding: 0.5rem 1rem 3rem; }
       .episodes-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+      .watch-details { flex-direction: column; align-items: flex-start; }
     }
   </style>
 </head>
@@ -381,13 +438,15 @@ function handleFrontend(origin) {
     <div class="logo" onclick="navigateToCatalog()">ANATA <span>STREAM</span></div>
     <div class="search-box">
       <span class="search-icon">🔍</span>
-      <input type="text" id="searchInput" placeholder="Pesquisar anime no catálogo..." />
+      <input type="text" id="searchInput" placeholder="Pesquisar anime ou filme..." />
     </div>
   </header>
 
   <!-- 1. ABA DO CATÁLOGO GERAL -->
   <main id="catalogView">
-    <h2 class="section-title" id="gridTitle">Catálogo de Animes (Google Drive)</h2>
+    <h2 class="section-title">
+      <span id="gridTitle">Catálogo de Conteúdos (Google Drive)</span>
+    </h2>
     <div class="anime-grid" id="animeGrid"></div>
   </main>
 
@@ -397,7 +456,7 @@ function handleFrontend(origin) {
       <button class="back-btn" onclick="navigateToCatalog()">
         ← Voltar ao Catálogo
       </button>
-      <div class="ep-nav-controls">
+      <div class="ep-nav-controls" id="navControlsWrapper">
         <button class="nav-ep-btn" id="prevEpBtn" onclick="playAdjacentEpisode(-1)">
           ⏮ Anterior
         </button>
@@ -411,10 +470,23 @@ function handleFrontend(origin) {
       <div id="artplayer-container"></div>
     </div>
 
+    <div id="playerBufferNotice" style="display:none; margin-bottom:1.25rem; padding:0.85rem 1.1rem; background:rgba(245, 158, 11, 0.12); border:1px solid rgba(245, 158, 11, 0.4); border-radius:8px; font-size:0.85rem; color:#fef3c7;">
+      ⚡ <strong>Aviso de Streaming:</strong> O Google Drive ainda está gerando o transcode de pré-visualização deste vídeo. Você pode assistir ou abrir imediatamente via link direto de download: 
+      <a id="playerDirectLinkNotice" target="_blank" style="color:#38bdf8; text-decoration:underline; font-weight:bold; margin-left:6px;" href="#">Abrir Stream Acelerado</a>
+    </div>
+
     <div class="watch-details">
       <div class="anime-headline">
-        <h1 id="watchAnimeTitle">Nome do Anime</h1>
+        <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+          <span id="watchTypeBadge" class="badge badge-series">📺 SÉRIE</span>
+          <h1 id="watchAnimeTitle">Nome do Anime</h1>
+        </div>
         <p id="watchEpisodeHeadline">Temporada 1 • Episódio 1</p>
+      </div>
+      <div>
+        <a id="directStreamBtn" class="direct-download-btn" target="_blank" href="#">
+          ⬇️ Link Direto (Download / Player Externo)
+        </a>
       </div>
     </div>
 
@@ -428,6 +500,16 @@ function handleFrontend(origin) {
     let currentSeason = null;
     let currentEpisode = null;
     let currentEpisodesList = [];
+
+    function isMovie(anime) {
+      if (!anime) return false;
+      if (anime.title && (anime.title.toLowerCase().includes('filme') || anime.title.toLowerCase().includes('movie'))) return true;
+      if (anime.seasons && anime.seasons.length === 1) {
+        const s = anime.seasons[0];
+        if (s.name && (s.name.toLowerCase() === 'filme' || s.name.toLowerCase().includes('movie'))) return true;
+      }
+      return false;
+    }
 
     // === INICIALIZAÇÃO E NAVEGAÇÃO ===
     async function initApp() {
@@ -455,53 +537,73 @@ function handleFrontend(origin) {
     }
 
     function showCatalogView() {
-      if (art) { art.pause(); }
       document.getElementById('catalogView').style.display = 'block';
       document.getElementById('watchView').style.display = 'none';
-      document.title = 'Anata Stream — Catálogo de Animes';
+      if (art) { art.pause(); }
+      document.title = 'Anata Stream — Portal de Animes e Filmes';
     }
 
-    async function openWatchView(tmdbId, seasonNum = 1, epNum = 1) {
+    async function openWatchView(tmdbId, seasonNum, epNum) {
       document.getElementById('catalogView').style.display = 'none';
       document.getElementById('watchView').style.display = 'block';
       window.scrollTo({ top: 0, behavior: 'smooth' });
 
-      if (!currentAnime || currentAnime.tmdb_id != tmdbId) {
-        const res = await fetch('/api/anime/' + tmdbId);
-        currentAnime = await res.json();
-      }
-
-      if (!currentAnime) {
-        alert('Anime não encontrado.');
+      const res = await fetch('/api/anime/' + tmdbId);
+      const anime = await res.json();
+      if (!anime) {
+        alert('Conteúdo não encontrado no banco de dados.');
         navigateToCatalog();
         return;
       }
 
-      document.getElementById('watchAnimeTitle').innerText = currentAnime.title;
-      renderWatchSeasons(currentAnime, seasonNum, epNum);
+      currentAnime = anime;
+      renderWatchView(anime, seasonNum, epNum);
     }
 
-    // === SELETORES DE TEMPORADAS E EPISÓDIOS ===
-    function renderWatchSeasons(anime, targetSeasonNum, targetEpNum) {
-      const tabs = document.getElementById('seasonTabs');
-      tabs.innerHTML = '';
-      const seasons = (anime.seasons || []).sort((a,b) => a.season_number - b.season_number);
+    function renderWatchView(anime, targetSeasonNum, targetEpNum) {
+      const isFilm = isMovie(anime);
+      document.getElementById('watchAnimeTitle').innerText = anime.title;
 
-      let selectedSeason = seasons.find(s => s.season_number === targetSeasonNum) || seasons[0];
+      const typeBadge = document.getElementById('watchTypeBadge');
+      const navControls = document.getElementById('navControlsWrapper');
+      const seasonTabs = document.getElementById('seasonTabs');
+
+      if (isFilm) {
+        typeBadge.className = 'badge badge-movie';
+        typeBadge.innerText = '🎬 FILME';
+        navControls.style.display = 'none';
+        seasonTabs.style.display = 'none';
+      } else if (anime.tmdb_id >= 900000000) {
+        typeBadge.className = 'badge badge-hentai';
+        typeBadge.innerText = '🔞 +18';
+        navControls.style.display = 'flex';
+        seasonTabs.style.display = 'flex';
+      } else {
+        typeBadge.className = 'badge badge-series';
+        typeBadge.innerText = '📺 SÉRIE';
+        navControls.style.display = 'flex';
+        seasonTabs.style.display = 'flex';
+      }
+
+      const seasons = (anime.seasons || []).sort((a,b) => a.season_number - b.season_number);
+      let selectedSeason = seasons.find(s => s.season_number === targetSeasonNum) || seasons[0] || { season_number: 1, episodes: [] };
       currentSeason = selectedSeason;
 
-      seasons.forEach(s => {
-        const btn = document.createElement('button');
-        btn.className = 'season-tab ' + (s.season_number === selectedSeason.season_number ? 'active' : '');
-        btn.innerText = 'Temporada ' + s.season_number;
-        btn.onclick = () => {
-          document.querySelectorAll('.season-tab').forEach(t => t.classList.remove('active'));
-          btn.classList.add('active');
-          currentSeason = s;
-          renderWatchEpisodes(s, 1);
-        };
-        tabs.appendChild(btn);
-      });
+      seasonTabs.innerHTML = '';
+      if (!isFilm) {
+        seasons.forEach(s => {
+          const btn = document.createElement('button');
+          btn.className = 'season-tab ' + (s.season_number === selectedSeason.season_number ? 'active' : '');
+          btn.innerText = s.name || ('Temporada ' + s.season_number);
+          btn.onclick = () => {
+            document.querySelectorAll('.season-tab').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentSeason = s;
+            renderWatchEpisodes(s, 1);
+          };
+          seasonTabs.appendChild(btn);
+        });
+      }
 
       renderWatchEpisodes(selectedSeason, targetEpNum);
     }
@@ -509,6 +611,7 @@ function handleFrontend(origin) {
     function renderWatchEpisodes(season, targetEpNum) {
       const grid = document.getElementById('episodesGrid');
       grid.innerHTML = '';
+      const isFilm = isMovie(currentAnime);
       currentEpisodesList = (season.episodes || []).sort((a,b) => a.episode_number - b.episode_number);
 
       let targetEp = currentEpisodesList.find(e => e.episode_number === targetEpNum) || currentEpisodesList[0];
@@ -519,10 +622,17 @@ function handleFrontend(origin) {
         const isCurrent = targetEp && ep.id === targetEp.id;
 
         card.className = 'ep-card ' + (isCurrent ? 'playing' : '');
-        card.innerHTML = \`
-          <div class="ep-card-tag">EPISÓDIO \${ep.episode_number} \${hasMedia ? '⚡' : '⏳'}</div>
-          <div class="ep-card-title">\${ep.name || 'Episódio ' + ep.episode_number}</div>
-        \`;
+        if (isFilm) {
+          card.innerHTML = \`
+            <div class="ep-card-tag">🎬 FILME \${hasMedia ? '⚡' : '⏳'}</div>
+            <div class="ep-card-title">\${currentAnime.title}</div>
+          \`;
+        } else {
+          card.innerHTML = \`
+            <div class="ep-card-tag">EPISÓDIO \${ep.episode_number} \${hasMedia ? '⚡' : '⏳'}</div>
+            <div class="ep-card-title">\${ep.name || 'Episódio ' + ep.episode_number}</div>
+          \`;
+        }
 
         if (hasMedia) {
           card.onclick = () => playEpisode(ep);
@@ -543,11 +653,20 @@ function handleFrontend(origin) {
       currentEpisode = ep;
       const media = ep.media_sources[0];
       const streamUrl = '/stream/' + media.gdrive_file_id + '/video.mp4';
-      const epLabel = 'T' + currentSeason.season_number + 'E' + ep.episode_number + ' • ' + (ep.name || 'Episódio ' + ep.episode_number);
+      const isFilm = isMovie(currentAnime);
+      const epLabel = isFilm 
+        ? ('🎬 Filme Completo • ' + currentAnime.title) 
+        : ('T' + currentSeason.season_number + 'E' + ep.episode_number + ' • ' + (ep.name || 'Episódio ' + ep.episode_number));
       
       document.getElementById('watchEpisodeHeadline').innerText = epLabel;
       document.title = currentAnime.title + ' — ' + epLabel;
       window.location.hash = '#/watch/' + currentAnime.tmdb_id + '/' + currentSeason.season_number + '/' + ep.episode_number;
+
+      // Atualiza botões diretos
+      const directBtn = document.getElementById('directStreamBtn');
+      if (directBtn) { directBtn.href = streamUrl; }
+      const directNoticeLink = document.getElementById('playerDirectLinkNotice');
+      if (directNoticeLink) { directNoticeLink.href = streamUrl; }
 
       // Atualiza estado visual dos cards
       document.querySelectorAll('.ep-card').forEach(c => c.classList.remove('playing'));
@@ -556,8 +675,10 @@ function handleFrontend(origin) {
       if (cards[activeIdx]) { cards[activeIdx].classList.add('playing'); }
 
       // Atualiza botões Anterior / Próximo
-      document.getElementById('prevEpBtn').disabled = (activeIdx <= 0);
-      document.getElementById('nextEpBtn').disabled = (activeIdx >= currentEpisodesList.length - 1);
+      if (!isFilm) {
+        document.getElementById('prevEpBtn').disabled = (activeIdx <= 0);
+        document.getElementById('nextEpBtn').disabled = (activeIdx >= currentEpisodesList.length - 1);
+      }
 
       if (!art) {
         art = new Artplayer({
@@ -577,16 +698,22 @@ function handleFrontend(origin) {
           fullscreenWeb: true,
           playsInline: true,
           airplay: true,
-          fastForward: true, // Segurar na tela do celular para 2x
+          fastForward: true,
           theme: '#e11d48',
           icons: {
             loading: '<span style="color:#e11d48;font-weight:bold;">Carregando stream...</span>'
           }
         });
 
-        // Quando o episódio terminar, avança automaticamente para o próximo
+        art.on('error', () => {
+          const notice = document.getElementById('playerBufferNotice');
+          if (notice) notice.style.display = 'block';
+        });
+
         art.on('video:ended', () => {
-          playAdjacentEpisode(1);
+          if (!isMovie(currentAnime)) {
+            playAdjacentEpisode(1);
+          }
         });
       } else {
         art.switchUrl(streamUrl, epLabel);
@@ -617,13 +744,20 @@ function handleFrontend(origin) {
       const grid = document.getElementById('animeGrid');
       grid.innerHTML = '';
       if (!animes || animes.length === 0) {
-        grid.innerHTML = '<p style="color: var(--text-muted); grid-column: 1/-1;">Nenhum anime cadastrado no momento.</p>';
+        grid.innerHTML = '<p style="color: var(--text-muted); grid-column: 1/-1;">Nenhum conteúdo cadastrado no momento.</p>';
         return;
       }
       animes.forEach(a => {
         const card = document.createElement('div');
         card.className = 'anime-card';
         const posterUrl = a.poster_path ? 'https://image.tmdb.org/t/p/w500' + a.poster_path : 'https://via.placeholder.com/300x450/11131c/94a3b8?text=Sem+Capa';
+        
+        const isFilm = isMovie(a);
+        const isHentai = (a.title && a.title.toLowerCase().includes('hentai')) || (a.genres && JSON.stringify(a.genres).toLowerCase().includes('hentai')) || a.tmdb_id >= 900000000;
+        const badgeHtml = isFilm 
+          ? '<span class="badge badge-movie">🎬 FILME</span>'
+          : (isHentai ? '<span class="badge badge-hentai">🔞 +18</span>' : '<span class="badge badge-series">📺 SÉRIE</span>');
+
         card.innerHTML = \`
           <div class="poster-wrapper">
             <img src="\${posterUrl}" alt="\${a.title}" loading="lazy" />
@@ -631,12 +765,11 @@ function handleFrontend(origin) {
           <div class="card-info">
             <div class="card-title">\${a.title}</div>
             <div class="card-meta">
-              <span>\${a.first_air_date ? a.first_air_date.substring(0,4) : 'Anime'}</span>
-              <span>TMDB #\${a.tmdb_id}</span>
+              \${badgeHtml}
+              <span>\${a.first_air_date ? a.first_air_date.substring(0,4) : ''}</span>
             </div>
           </div>
         \`;
-        // Ao clicar, navega para a aba de reprodução individual com URL compartilhável
         card.onclick = () => {
           window.location.hash = '#/watch/' + a.tmdb_id + '/1/1';
         };
@@ -650,7 +783,7 @@ function handleFrontend(origin) {
       const q = e.target.value.trim();
       searchTimeout = setTimeout(async () => {
         if (!q) {
-          document.getElementById('gridTitle').innerText = 'Catálogo de Animes (Google Drive)';
+          document.getElementById('gridTitle').innerText = 'Catálogo de Conteúdos (Google Drive)';
           loadCatalog();
           return;
         }
@@ -678,7 +811,7 @@ function handleFrontend(origin) {
 /* ================= APIs DO SUPABASE ================= */
 
 async function handleCatalog(env, corsHeaders) {
-  const res = await fetch(`${env.SUPABASE_URL}/rest/v1/animes?select=*&order=created_at.desc&limit=50`, {
+  const res = await fetch(`${env.SUPABASE_URL}/rest/v1/animes?select=*,seasons(id,name,season_number,episode_count)&order=created_at.desc&limit=60`, {
     headers: {
       "apikey": env.SUPABASE_ANON_KEY,
       "Authorization": `Bearer ${env.SUPABASE_ANON_KEY}`
@@ -691,7 +824,7 @@ async function handleCatalog(env, corsHeaders) {
 }
 
 async function handleSearch(query, env, corsHeaders) {
-  const res = await fetch(`${env.SUPABASE_URL}/rest/v1/animes?title=ilike.*${encodeURIComponent(query)}*&select=*&limit=30`, {
+  const res = await fetch(`${env.SUPABASE_URL}/rest/v1/animes?title=ilike.*${encodeURIComponent(query)}*&select=*,seasons(id,name,season_number,episode_count)&limit=30`, {
     headers: {
       "apikey": env.SUPABASE_ANON_KEY,
       "Authorization": `Bearer ${env.SUPABASE_ANON_KEY}`
@@ -721,19 +854,45 @@ async function handleAnimeDetails(tmdbId, env, corsHeaders) {
 
 async function handleStreamProxy(gdriveId, request) {
   const cleanId = gdriveId.replace(/\.mp4$/i, "").split("/")[0];
-  const targetUrl = `https://drive.usercontent.google.com/download?id=${cleanId}&export=download&confirm=t`;
-
   const clientRange = request.headers.get("Range");
-  const fetchHeaders = new Headers({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "*/*"
-  });
 
+  const commonHeaders = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "*/*"
+  };
+
+  // 1. Tenta obter o link de download direto resolvendo o token 'uuid' do Google Drive
+  let downloadUrl = `https://drive.usercontent.google.com/download?id=${cleanId}&export=download&confirm=t`;
+
+  try {
+    const probeRes = await fetch(`https://drive.google.com/uc?export=download&id=${cleanId}`, {
+      headers: commonHeaders,
+      redirect: "follow"
+    });
+
+    const probeType = probeRes.headers.get("content-type") || "";
+    // Se retornou página HTML de aviso de vírus (> 100MB), extrai o parâmetro uuid e confirm
+    if (probeType.includes("text/html")) {
+      const html = await probeRes.text();
+      const uuidMatch = html.match(/name="uuid"\s+value="([^"]+)"/i) || html.match(/uuid=([a-f0-9-]+)/i);
+      if (uuidMatch) {
+        const uuid = uuidMatch[1];
+        downloadUrl = `https://drive.usercontent.google.com/download?id=${cleanId}&export=download&confirm=t&uuid=${uuid}`;
+      }
+    } else if (probeType.includes("video") || probeType.includes("binary") || probeType.includes("octet-stream")) {
+      downloadUrl = probeRes.url || downloadUrl;
+    }
+  } catch (err) {
+    // Fallback silencioso para URL padrão com confirm=t
+  }
+
+  // 2. Requisição do stream com Range repassado
+  const fetchHeaders = new Headers(commonHeaders);
   if (clientRange) {
     fetchHeaders.set("Range", clientRange);
   }
 
-  const driveRes = await fetch(targetUrl, {
+  const driveRes = await fetch(downloadUrl, {
     method: "GET",
     headers: fetchHeaders,
     redirect: "follow"
@@ -744,7 +903,7 @@ async function handleStreamProxy(gdriveId, request) {
   responseHeaders.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
   responseHeaders.set("Access-Control-Allow-Headers", "Range, Content-Type, Accept-Ranges");
   responseHeaders.set("Content-Type", "video/mp4");
-  responseHeaders.set("Content-Disposition", "inline");
+  responseHeaders.set("Content-Disposition", "inline; filename=\"video.mp4\"");
 
   if (driveRes.headers.has("Content-Length")) {
     responseHeaders.set("Content-Length", driveRes.headers.get("Content-Length"));
