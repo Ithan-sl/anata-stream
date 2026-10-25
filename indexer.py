@@ -36,9 +36,37 @@ def search_anime_tmdb(query: str) -> list:
     res.raise_for_status()
     return res.json().get("results", [])
 
+def sync_custom_anime(tmdb_id: int, title: str, original_title: str = None, overview: str = None, poster_path: str = None, backdrop_path: str = None) -> str:
+    """Registra ou atualiza um anime customizado (ex: Hentai ou título sem cadastro no TMDB) no Supabase."""
+    supabase = get_supabase()
+    anime_payload = {
+        "tmdb_id": tmdb_id,
+        "title": title,
+        "original_title": original_title or title,
+        "overview": overview or "",
+        "poster_path": poster_path,
+        "backdrop_path": backdrop_path,
+        "status": "Ended",
+        "genres": []
+    }
+    db_anime = supabase.table("animes").upsert(anime_payload, on_conflict="tmdb_id").execute()
+    if not db_anime.data:
+        raise RuntimeError(f"Falha ao persistir anime customizado {tmdb_id} no Supabase.")
+    anime_id = db_anime.data[0]["id"]
+    print(f"[+] Anime customizado persistido: {title} [TMDB: {tmdb_id} | UUID: {anime_id}]")
+    return anime_id
+
 def sync_anime(tmdb_id: int) -> str:
     """Busca dados da série, temporadas e episódios no TMDB e sincroniza no Supabase."""
     supabase = get_supabase()
+    
+    # Se for um ID sintético, reaproveita registro existente
+    if tmdb_id >= 900000000:
+        existing = supabase.table("animes").select("id").eq("tmdb_id", tmdb_id).execute()
+        if existing.data:
+            return existing.data[0]["id"]
+        return sync_custom_anime(tmdb_id, title=f"Anime {tmdb_id}")
+
     headers = get_tmdb_headers()
 
     url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?language=pt-BR"
@@ -47,6 +75,8 @@ def sync_anime(tmdb_id: int) -> str:
         # Fallback para Filme de Animação
         m_url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?language=pt-BR"
         m_res = requests.get(m_url, headers=headers)
+        if m_res.status_code == 404:
+            return sync_custom_anime(tmdb_id, title=f"Anime {tmdb_id}")
         m_res.raise_for_status()
         m_data = m_res.json()
 

@@ -12,6 +12,18 @@ on:
           - 'repair'
           - 'crawl'
         default: 'all'
+      section:
+        description: 'Seção a varrer (AnimeQ.cloud)'
+        required: true
+        type: choice
+        options:
+          - 'all'
+          - 'filme'
+          - 'hentai'
+          - 'dublado'
+          - 'legendado'
+          - 'anime'
+        default: 'all'
       ingest_mode:
         description: 'Modo de Ingestão'
         required: true
@@ -70,7 +82,7 @@ jobs:
             echo "[!] RCLONE_CONFIG_BASE64 não definido (necessário apenas para modo direct)."
           fi
 
-      - name: Run Harvester in GitHub Cloud (Intelligent Gap Detection & Direct Ingest)
+      - name: Run Harvester in GitHub Cloud (AnimeQ.cloud & Strict Completion Gate)
         env:
           PYTHONUNBUFFERED: "1"
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
@@ -79,9 +91,10 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
         run: |
-          echo "[*] Iniciando rastreador inteligente de animes..."
-          python3 -u smartplay_harvester.py \
+          echo "[*] Iniciando rastreador de animes (AnimeQ.cloud)..."
+          python3 -u animeq_harvester.py \
             --action "${{ inputs.action }}" \
+            --section "${{ inputs.section }}" \
             --mode "${{ inputs.ingest_mode }}" \
             --start "${{ inputs.start_page }}" \
             --pages "${{ inputs.max_pages }}"
