@@ -172,32 +172,160 @@ def get_existing_episodes_set(tmdb_id: int) -> set:
         print(f"[-] Exceção ao consultar episódios existentes: {e}")
         return set()
 
-def resolve_tmdb(title: str, original_title: str = None, wp_post_id: str = None, is_movie: bool = False, poster_url: str = None) -> int:
+def extract_page_metadata(html: str, anime_url: str, default_title: str) -> dict:
     """
-    Resolve o TMDB ID oficial pesquisando no TheMovieDB.
-    Se não for encontrado (ex: hentai, doujin ou sem cadastro), gera um TMDB ID sintético único.
+    Extrai título canônico, sinopse real, poster/capa, backdrop e ano diretamente da página do AnimeQ.cloud.
+    Garante que se o título não existir no TMDB, o cadastro no Supabase seja rico e completo (sem placeholders).
+    """
+    meta = {
+        "title": default_title,
+        "original_title": None,
+        "overview": "",
+        "poster_path": None,
+        "backdrop_path": None,
+        "release_date": None,
+        "is_movie": "/filme/" in anime_url
+    }
+
+    # 1. Título canônico
+    canonical_title = None
+    if BeautifulSoup:
+        soup = BeautifulSoup(html, "html.parser")
+        h1 = soup.find("h1")
+        if h1 and h1.get_text(strip=True):
+            canonical_title = h1.get_text(strip=True)
+    if not canonical_title:
+        m_h1 = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.DOTALL | re.IGNORECASE)
+        if m_h1:
+            canonical_title = re.sub(r'<[^>]+>', '', m_h1.group(1)).strip()
+    if not canonical_title:
+        m_og_title = re.search(r'<meta[^>]+property=[\'"]og:title[\'"][^>]+content=[\'"]([^\'"]+)[\'"]', html, re.IGNORECASE)
+        if m_og_title:
+            canonical_title = re.sub(r'\s*[-|–]\s*AnimeQ.*', '', m_og_title.group(1)).strip()
+
+    if canonical_title:
+        clean = (
+            canonical_title.replace("&acute;", "´")
+            .replace("&ccedil;", "ç")
+            .replace("&atilde;", "ã")
+            .replace("&eacute;", "é")
+            .replace("&ocirc;", "ô")
+            .replace("&quot;", '"')
+            .replace("&#039;", "'")
+            .strip()
+        )
+        if clean:
+            meta["title"] = clean
+
+    # 2. Título original
+    orig_m = re.search(r'Título Original\s*([^<]+)', html, re.IGNORECASE) or \
+             re.search(r'class=[\'"]valor[\'"]>([^<]+)</span>', html, re.IGNORECASE)
+    if orig_m:
+        meta["original_title"] = orig_m.group(1).strip()
+
+    # 3. Sinopse real
+    overview_text = ""
+    if BeautifulSoup:
+        soup = BeautifulSoup(html, "html.parser")
+        p_desc = soup.select_one(".wp-content p, #info .wp-content p, .sbox .wp-content p, .sinopse p, .entry-content p")
+        if p_desc and p_desc.get_text(strip=True):
+            overview_text = p_desc.get_text(strip=True)
+    if not overview_text:
+        m_desc = re.search(r'<meta[^>]+property=[\'"]og:description[\'"][^>]+content=[\'"]([^\'"]+)[\'"]', html, re.IGNORECASE)
+        if m_desc:
+            overview_text = m_desc.group(1).strip()
+    if not overview_text:
+        m_p = re.search(r'<div[^>]*class=[\'"][^\'"]*wp-content[^\'"]*[\'"][^>]*>[\s\S]*?<p>(.*?)</p>', html, re.IGNORECASE)
+        if m_p:
+            overview_text = re.sub(r'<[^>]+>', '', m_p.group(1)).strip()
+
+    if overview_text:
+        clean_ov = (
+            overview_text.replace("&acute;", "´")
+            .replace("&ccedil;", "ç")
+            .replace("&atilde;", "ã")
+            .replace("&eacute;", "é")
+            .replace("&ocirc;", "ô")
+            .replace("&quot;", '"')
+            .replace("&nbsp;", ' ')
+            .replace("&#039;", "'")
+            .strip()
+        )
+        if not any(ign in clean_ov.lower() for ign in ["assistir anime online completo", "assistir filmes online"]):
+            meta["overview"] = clean_ov
+
+    # 4. Poster real
+    poster_src = None
+    if BeautifulSoup:
+        soup = BeautifulSoup(html, "html.parser")
+        p_img = soup.select_one(".poster img, .sheader .poster img, article .poster img")
+        if p_img:
+            poster_src = p_img.get("src") or p_img.get("data-src") or p_img.get("data-lazy-src")
+    if not poster_src:
+        m_p_img = re.search(r'<div[^>]*class=[\'"][^\'"]*poster[^\'"]*[\'"][^>]*>[\s\S]*?<img[^>]+(?:src|data-src)=[\'"]([^\'"]+)[\'"]', html, re.IGNORECASE)
+        if m_p_img:
+            poster_src = m_p_img.group(1)
+    if not poster_src:
+        m_og_img = re.search(r'<meta[^>]+property=[\'"]og:image[\'"][^>]+content=[\'"]([^\'"]+)[\'"]', html, re.IGNORECASE)
+        if m_og_img:
+            poster_src = m_og_img.group(1)
+
+    if poster_src:
+        if poster_src.startswith("//"):
+            poster_src = "https:" + poster_src
+        meta["poster_path"] = poster_src
+
+    # 5. Backdrop / Banner real
+    backdrop_src = None
+    if BeautifulSoup:
+        soup = BeautifulSoup(html, "html.parser")
+        b_img = soup.select_one(".sbackdrop img, .backdrop img")
+        if b_img:
+            backdrop_src = b_img.get("src") or b_img.get("data-src")
+    if not backdrop_src:
+        m_b = re.search(r'<div[^>]*class=[\'"][^\'"]*(?:sbackdrop|backdrop)[^\'"]*[\'"][^>]*>[\s\S]*?<img[^>]+(?:src|data-src)=[\'"]([^\'"]+)[\'"]', html, re.IGNORECASE)
+        if m_b:
+            backdrop_src = m_b.group(1)
+    if backdrop_src:
+        if backdrop_src.startswith("//"):
+            backdrop_src = "https:" + backdrop_src
+        meta["backdrop_path"] = backdrop_src
+    else:
+        meta["backdrop_path"] = meta["poster_path"]
+
+    # 6. Ano de lançamento
+    m_year = re.search(r'\((\d{4})\)', meta["title"]) or re.search(r'<span[^>]*class=[\'"]date[\'"][^>]*>.*?(\d{4}).*?</span>', html, re.IGNORECASE)
+    if m_year:
+        meta["release_date"] = f"{m_year.group(1)}-01-01"
+
+    return meta
+
+def resolve_tmdb(title: str, original_title: str = None, wp_post_id: str = None, is_movie: bool = False, meta: dict = None) -> int:
+    """
+    Resolve o TMDB ID oficial pesquisando no TheMovieDB com separação estrita entre filmes e séries.
+    Se não for encontrado, registra como título customizado no Supabase usando a sinopse e capa reais da fonte.
     """
     clean_title = re.sub(r'[\(\)\[\]\-:]+', ' ', title).strip()
-    search_query = re.sub(r'\b(dublado|legendado|2nd season|season \d+|\d+nd season)\b', '', clean_title, flags=re.I).strip()
+    search_query = re.sub(r'\b(dublado|legendado|filme|movie|2nd season|season \d+|\d+nd season)\b', '', clean_title, flags=re.I).strip()
     if not search_query:
         search_query = clean_title
 
     headers = {"Authorization": f"Bearer {TMDB_TOKEN}", "Accept": "application/json"}
 
-    # 1. Pesquisa no TMDB
-    endpoints = ["search/movie", "search/tv"] if is_movie else ["search/tv", "search/movie"]
+    # 1. Pesquisa no TMDB com rota estrita
+    endpoints = ["search/movie"] if is_movie else ["search/tv", "search/movie"]
     for ep in endpoints:
         try:
             r = requests.get(f"https://api.themoviedb.org/3/{ep}", headers=headers, params={"query": search_query, "language": "pt-BR"}, timeout=10)
             if r.status_code == 200:
                 results = r.json().get("results", [])
                 if results:
-                    tmdb_id = results[0]["id"]
+                    tmdb_id = int(results[0]["id"])
                     try:
-                        indexer.sync_anime(tmdb_id)
+                        indexer.sync_anime(tmdb_id, is_movie=is_movie, custom_meta=meta)
                     except Exception as sync_err:
                         print(f"      [!] Aviso ao sincronizar metadados TMDB: {sync_err}")
-                    return int(tmdb_id)
+                    return tmdb_id
         except Exception:
             pass
 
@@ -210,26 +338,36 @@ def resolve_tmdb(title: str, original_title: str = None, wp_post_id: str = None,
                 if r.status_code == 200:
                     results = r.json().get("results", [])
                     if results:
-                        tmdb_id = results[0]["id"]
+                        tmdb_id = int(results[0]["id"])
                         try:
-                            indexer.sync_anime(tmdb_id)
+                            indexer.sync_anime(tmdb_id, is_movie=is_movie, custom_meta=meta)
                         except Exception:
                             pass
-                        return int(tmdb_id)
+                        return tmdb_id
             except Exception:
                 pass
 
-    # 3. Fallback: ID sintético único baseado no post_id do WordPress do AnimeQ
+    # 3. Fallback: ID sintético único baseado no post_id do WordPress
     if wp_post_id and str(wp_post_id).isdigit():
         synthetic_id = 900000000 + int(wp_post_id)
     else:
         synthetic_id = 900000000 + (abs(hash(clean_title)) % 90000000)
 
-    print(f"      [ℹ️ METADADOS] '{title}' não localizado no TMDB. Registrado como ID Sintético #{synthetic_id}.")
+    print(f"      [ℹ️ METADADOS DA FONTE] '{title}' não localizado no TMDB. Registrado com sinopse e capa da fonte AnimeQ (ID #{synthetic_id}).")
     try:
-        indexer.sync_custom_anime(synthetic_id, title=title, original_title=original_title or title, poster_path=poster_url)
+        m = meta or {}
+        indexer.sync_custom_anime(
+            synthetic_id,
+            title=title,
+            original_title=original_title or title,
+            overview=m.get("overview", ""),
+            poster_path=m.get("poster_path"),
+            backdrop_path=m.get("backdrop_path"),
+            is_movie=is_movie,
+            first_air_date=m.get("release_date")
+        )
     except Exception as e:
-        print(f"      [-] Falha ao sincronizar registro customizado: {e}")
+        print(f"      [-] Falha ao sincronizar registro customizado da fonte: {e}")
 
     return synthetic_id
 
@@ -315,7 +453,7 @@ def extract_stream_urls(page_url: str) -> list[str]:
 
     return candidates
 
-def ingest_direct(stream_url: str, tmdb_id: int, season_num: int, ep_num: int, title_slug: str) -> bool:
+def ingest_direct(stream_url: str, tmdb_id: int, season_num: int, ep_num: int, title_slug: str, is_movie: bool = False, custom_meta: dict = None) -> bool:
     """
     Executa a ingestão direta no runner com ffmpeg (-c copy) e upload Rclone.
     """
@@ -338,7 +476,7 @@ def ingest_direct(stream_url: str, tmdb_id: int, season_num: int, ep_num: int, t
             linked = False
             for sub_attempt in range(1, 4):
                 try:
-                    indexer.link_stream_source(int(tmdb_id), season_num, ep_num, existing_id, file_name, 0)
+                    indexer.link_stream_source(int(tmdb_id), season_num, ep_num, existing_id, file_name, 0, is_movie=is_movie, custom_meta=custom_meta)
                     print(f"      [✓ SUCESSO] T{season_num:02d}E{ep_num:02d} vinculado ao Supabase!")
                     linked = True
                     break
@@ -429,7 +567,7 @@ def ingest_direct(stream_url: str, tmdb_id: int, season_num: int, ep_num: int, t
     supabase_ok = False
     for sub_attempt in range(1, 4):
         try:
-            indexer.link_stream_source(int(tmdb_id), season_num, ep_num, gdrive_id, file_name, file_bytes)
+            indexer.link_stream_source(int(tmdb_id), season_num, ep_num, gdrive_id, file_name, file_bytes, is_movie=is_movie, custom_meta=custom_meta)
             print(f"      [✓ SUCESSO] T{season_num:02d}E{ep_num:02d} enviado e registrado no Supabase!")
             supabase_ok = True
             break
@@ -486,7 +624,7 @@ def dispatch_to_github(stream_url: str, tmdb_id: int, season_num: int, ep_num: i
             time.sleep(2)
     return False
 
-def process_episode_candidates(stream_candidates: list[str], tmdb_id: int, season_num: int, ep_num: int, title_slug: str, mode: str = "direct", dead_urls: set = None) -> bool:
+def process_episode_candidates(stream_candidates: list[str], tmdb_id: int, season_num: int, ep_num: int, title_slug: str, mode: str = "direct", dead_urls: set = None, is_movie: bool = False, custom_meta: dict = None) -> bool:
     """Tenta ingerir o episódio percorrendo os streams candidatos com eliminação de URLs mortas."""
     if not stream_candidates:
         print(f"      [!] Nenhum link de vídeo extraído para este episódio.")
@@ -503,7 +641,7 @@ def process_episode_candidates(stream_candidates: list[str], tmdb_id: int, seaso
     for idx, stream_url in enumerate(valid_candidates, 1):
         print(f"      ▶ Testando fonte {idx}/{len(valid_candidates)}: {stream_url[:75]}...")
         if mode == "direct" and is_rclone_available():
-            ok = ingest_direct(stream_url, tmdb_id, season_num, ep_num, title_slug)
+            ok = ingest_direct(stream_url, tmdb_id, season_num, ep_num, title_slug, is_movie=is_movie, custom_meta=custom_meta)
         else:
             ok = dispatch_to_github(stream_url, tmdb_id, season_num, ep_num, title_slug)
 
@@ -592,58 +730,27 @@ def harvest_anime(anime_url: str, anime_title: str, mode: str = "direct", strict
         print(f"  [❌ ERRO] Não foi possível carregar a página de '{anime_title}'.")
         return False
 
-    # Extrai o título canônico da tag <h1> da página específica
-    if BeautifulSoup:
-        page_soup = BeautifulSoup(html, "html.parser")
-        h1_tag = page_soup.find("h1")
-        if h1_tag and h1_tag.get_text(strip=True):
-            canonical_title = h1_tag.get_text(strip=True)
-            canonical_title = (
-                canonical_title.replace("&acute;", "´")
-                .replace("&ccedil;", "ç")
-                .replace("&atilde;", "ã")
-                .replace("&eacute;", "é")
-                .replace("&ocirc;", "ô")
-                .strip()
-            )
-            if canonical_title:
-                anime_title = canonical_title
-    else:
-        m_h1 = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.DOTALL | re.IGNORECASE)
-        if m_h1:
-            raw_h1 = re.sub(r'<[^>]+>', '', m_h1.group(1)).strip()
-            canonical_title = (
-                raw_h1.replace("&acute;", "´")
-                .replace("&ccedil;", "ç")
-                .replace("&atilde;", "ã")
-                .replace("&eacute;", "é")
-                .replace("&ocirc;", "ô")
-                .strip()
-            )
-            if canonical_title:
-                anime_title = canonical_title
+    # Extrai metadados completos da página (título canônico, sinopse real, poster, backdrop e data)
+    meta = extract_page_metadata(html, anime_url, anime_title)
+    anime_title = meta["title"]
+    is_movie = meta["is_movie"]
+    original_title = meta["original_title"]
 
     print(f"\n================================================================")
-    print(f"🎬 [PROCESSANDO] {anime_title}")
+    print(f"{'🎬 [FILME]' if is_movie else '📺 [ANIME]'} {anime_title}")
     print(f"   URL: {anime_url}")
+    if meta.get("overview"):
+        print(f"   Sinopse: {meta['overview'][:100]}...")
+    if meta.get("poster_path"):
+        print(f"   Poster: {meta['poster_path']}")
     print(f"================================================================")
-
-    is_movie = "/filme/" in anime_url
 
     # Extrai Post ID do WordPress
     post_id_match = re.search(r'data-postid=[\'"](\d+)[\'"]|data-id=[\'"](\d+)[\'"]|data-post=[\'"](\d+)[\'"]', html)
     wp_post_id = post_id_match.group(1) or post_id_match.group(2) or post_id_match.group(3) if post_id_match else None
 
-    # Extrai título original se disponível
-    orig_match = re.search(r'Título Original\s*([^<]+)', html)
-    original_title = orig_match.group(1).strip() if orig_match else None
-
-    # Extrai poster
-    poster_match = re.search(r'<img[^>]+src=[\'"](https?://image\.tmdb\.org/t/p/[^\'"]+)[\'"]', html)
-    poster_url = poster_match.group(1) if poster_match else None
-
-    # 1. Resolve TMDB ID
-    tmdb_id = resolve_tmdb(anime_title, original_title=original_title, wp_post_id=wp_post_id, is_movie=is_movie, poster_url=poster_url)
+    # 1. Resolve TMDB ID com separação estrita de filme e metadados reais
+    tmdb_id = resolve_tmdb(anime_title, original_title=original_title, wp_post_id=wp_post_id, is_movie=is_movie, meta=meta)
 
     # 2. Extrai episódios
     episodes = parse_post_episodes(anime_url, html)
@@ -694,7 +801,7 @@ def harvest_anime(anime_url: str, anime_title: str, mode: str = "direct", strict
             success = False
             for attempt in range(1, 3):
                 try:
-                    if process_episode_candidates(candidates, tmdb_id, s_num, e_num, slug, mode=mode, dead_urls=dead_urls_cache):
+                    if process_episode_candidates(candidates, tmdb_id, s_num, e_num, slug, mode=mode, dead_urls=dead_urls_cache, is_movie=is_movie, custom_meta=meta):
                         existing_eps.add((s_num, e_num))
                         success = True
                         break
@@ -775,11 +882,20 @@ def crawl_section(section_name: str, start_page: int = 1, max_pages: int = 3, mo
         items = []
         if BeautifulSoup:
             soup = BeautifulSoup(html, "html.parser")
-            for art in soup.select("article.item, .items article"):
+            # Seleciona artigos do catálogo principal excluindo barra lateral/recomendações
+            for art in soup.select("#archive-content article, .animation-2 article, .content .items article, article.item"):
+                if art.find_parent("aside") or art.find_parent(class_="sidebar"):
+                    continue
                 a_tag = art.find("a", href=True)
                 if not a_tag:
                     continue
                 href = a_tag["href"]
+
+                # Filtro estrito: se a seção for 'filme', aceita SOMENTE /filme/
+                if section_name == "filme" and "/filme/" not in href:
+                    continue
+                if section_name == "anime" and "/anime/" not in href:
+                    continue
                 if not ("/anime/" in href or "/filme/" in href):
                     continue
                 
@@ -802,11 +918,16 @@ def crawl_section(section_name: str, start_page: int = 1, max_pages: int = 3, mo
                 if clean_title and not any(full_href == it[0] for it in items):
                     items.append((full_href, clean_title))
         else:
-            for art_block in re.findall(r'<article[^>]*>.*?</article>', html, re.DOTALL | re.IGNORECASE):
+            main_html = html.split('<aside')[0] if '<aside' in html else html
+            for art_block in re.findall(r'<article[^>]*>.*?</article>', main_html, re.DOTALL | re.IGNORECASE):
                 m_href = re.search(r'href=["\']([^"\']*(?:/anime/|/filme/)[^"\']*)["\']', art_block)
                 if not m_href:
                     continue
                 href = m_href.group(1)
+                if section_name == "filme" and "/filme/" not in href:
+                    continue
+                if section_name == "anime" and "/anime/" not in href:
+                    continue
                 m_title = (
                     re.search(r'<(?:h3|span)[^>]*class=["\'][^"\']*(?:title|data)[^"\']*["\'][^>]*>(.*?)</(?:h3|span)>', art_block, re.DOTALL | re.IGNORECASE)
                     or re.search(r'<h3[^>]*>(.*?)</h3>', art_block, re.DOTALL | re.IGNORECASE)
