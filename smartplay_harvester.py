@@ -21,6 +21,7 @@ import json
 import argparse
 import subprocess
 import requests
+import socket
 
 # Força o flush imediato dos logs no terminal e no runner do GitHub Actions
 if hasattr(sys.stdout, 'reconfigure'):
@@ -59,6 +60,48 @@ BASE_HEADERS = {
     "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8"
 }
 session.headers.update(BASE_HEADERS)
+
+def check_supabase_health() -> bool:
+    """Valida se o Supabase está online e com DNS ativo antes de iniciar qualquer operação."""
+    if not SUPABASE_URL:
+        print("[❌ ERRO] SUPABASE_URL não configurada.")
+        return False
+    host = urllib.parse.urlparse(SUPABASE_URL).netloc
+    try:
+        socket.gethostbyname(host)
+    except socket.gaierror:
+        print("\n" + "=" * 70)
+        print("❌ [ERRO CRÍTICO SUPABASE] DNS NÃO ENCONTRADO PARA:")
+        print(f"   {SUPABASE_URL}")
+        print("\n   MOTIVO:")
+        print("   O projeto Supabase foi PAUSADO por inatividade (Free Tier pausa após 7 dias sem acesso).")
+        print("   Por isso, nenhuma conexão ou inserção de episódios no banco consegue ser realizada.")
+        print("\n   COMO REATIVAR:")
+        print("   1. Acesse o painel da Supabase: https://supabase.com/dashboard")
+        print("   2. Selecione seu projeto e clique no botão 'Restore project' (ou 'Unpause').")
+        print("   3. Aguarde 1 a 2 minutos para o banco e o DNS restabelecerem.")
+        print("   4. Execute o workflow do GitHub Actions novamente.")
+        print("=" * 70 + "\n")
+        return False
+    except Exception as e:
+        print(f"[-] Erro ao verificar DNS do Supabase: {e}")
+        return False
+
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/animes?select=id&limit=1",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+            timeout=10
+        )
+        if r.status_code in [200, 206]:
+            print(f"[✓] Conexão com Supabase validada com sucesso ({host}).")
+            return True
+        else:
+            print(f"[-] Supabase retornou status HTTP {r.status_code}: {r.text}")
+            return False
+    except Exception as e:
+        print(f"[-] Falha na requisição ao Supabase: {e}")
+        return False
 
 def prune_cookies(keep_post_id: str = None):
     """Remove cookies de temporadas de outros posts para evitar erro HTTP 431."""
@@ -236,16 +279,28 @@ def ingest_direct(stream_url: str, tmdb_id: str, season_num: int, ep_num: int, t
     try:
         check_res = subprocess.run(
             ["rclone", "lsf", dest_dir, "--format", "i", "--files-only", "--filter", f"+ {file_name}"],
-            capture_output=True, text=True, timeout=15
+            capture_output=True, text=True, timeout=45
         )
         existing_id = check_res.stdout.strip().splitlines()[0] if check_res.stdout.strip() else ""
         if existing_id:
             print(f"      [✓ Já no Drive] Arquivo existente detectado (ID: {existing_id}). Vinculando no Supabase...")
-            indexer.sync_anime(int(tmdb_id))
-            indexer.link_stream_source(int(tmdb_id), season_num, ep_num, existing_id, file_name, 0)
-            return True
-    except Exception:
-        pass
+            linked = False
+            for sub_attempt in range(1, 4):
+                try:
+                    indexer.link_stream_source(int(tmdb_id), season_num, ep_num, existing_id, file_name, 0)
+                    print(f"      [✓ SUCESSO] T{season_num:02d}E{ep_num:02d} vinculado ao Supabase!")
+                    linked = True
+                    break
+                except Exception as link_err:
+                    print(f"      [-] Erro ao vincular ao Supabase (Tentativa {sub_attempt}/3): {link_err}")
+                    time.sleep(sub_attempt * 2)
+            if linked:
+                return True
+            else:
+                print(f"      [❌ ERRO] Falha ao registrar arquivo existente no Supabase. O episódio NÃO será ignorado.")
+                return False
+    except Exception as e:
+        print(f"      [!] Falha na checagem anti-duplicação: {e}")
 
     # 3. Download e Remux direto via ffmpeg
     local_temp = f"/tmp/{file_name}"
@@ -289,10 +344,10 @@ def ingest_direct(stream_url: str, tmdb_id: str, season_num: int, ep_num: int, t
     try:
         id_res = subprocess.run(
             ["rclone", "lsf", dest_dir, "--format", "i", "--files-only", "--filter", f"+ {file_name}"],
-            capture_output=True, text=True, check=True, timeout=15
+            capture_output=True, text=True, check=True, timeout=45
         )
         gdrive_id = id_res.stdout.strip().splitlines()[0]
-        subprocess.run(["rclone", "link", f"{dest_dir}/{file_name}"], capture_output=True, timeout=15)
+        subprocess.run(["rclone", "link", f"{dest_dir}/{file_name}"], capture_output=True, timeout=45)
     except Exception as e:
         print(f"      [-] Falha ao obter ID do arquivo no Google Drive: {e}")
         if os.path.exists(local_temp):
@@ -301,15 +356,24 @@ def ingest_direct(stream_url: str, tmdb_id: str, season_num: int, ep_num: int, t
 
     # 6. Sincroniza Metadados no Supabase
     print(f"      [+] Sincronizando com Supabase...")
-    try:
-        indexer.link_stream_source(int(tmdb_id), season_num, ep_num, gdrive_id, file_name, file_bytes)
-        print(f"      [✓ SUCESSO] T{season_num:02d}E{ep_num:02d} enviado e registrado no Supabase!")
-    except Exception as e:
-        print(f"      [-] Erro ao atualizar Supabase: {e}")
+    supabase_ok = False
+    for sub_attempt in range(1, 4):
+        try:
+            indexer.link_stream_source(int(tmdb_id), season_num, ep_num, gdrive_id, file_name, file_bytes)
+            print(f"      [✓ SUCESSO] T{season_num:02d}E{ep_num:02d} enviado e registrado no Supabase!")
+            supabase_ok = True
+            break
+        except Exception as e:
+            print(f"      [-] Erro ao atualizar Supabase (Tentativa {sub_attempt}/3): {e}")
+            time.sleep(sub_attempt * 2)
 
     # 7. Limpeza do arquivo temporário
     if os.path.exists(local_temp):
         os.remove(local_temp)
+
+    if not supabase_ok:
+        print(f"      [❌ ERRO] Episódio T{season_num:02d}E{ep_num:02d} NÃO foi registrado no Supabase.")
+        return False
 
     return True
 
@@ -882,7 +946,11 @@ def crawl_catalog(start_page: int = 1, max_pages: int = 3, mode: str = "direct")
             print(f"\n================================================================")
             print(f"🎬 [ANIME {idx}/{len(matches)} DA PÁGINA {page}] {clean_title} (#{post_id})")
             print(f"================================================================")
-            harvest_anime_post(post_id, clean_title, mode=mode)
+            anime_ok = harvest_anime_post(post_id, clean_title, mode=mode)
+            if not anime_ok:
+                print(f"  [⛔ BLOQUEIO DE SEGURANÇA] Anime '{clean_title}' (#{post_id}) não pôde ter todos os episódios concluídos.")
+                print("  -> Interrompendo a varredura para NUNCA pular episódios nem avançar com dados incompletos.")
+                return False
 
 def main():
     parser = argparse.ArgumentParser(description="Anata Stream — Anime Harvester & Repair")
@@ -908,6 +976,10 @@ def main():
     print("================================================================")
     print(f"  ANATA STREAM — MODO: {args.action.upper()} | INGESTÃO: {args.mode.upper()}")
     print("================================================================")
+
+    # Pré-validação estrita do Supabase antes de iniciar qualquer trabalho
+    if not check_supabase_health():
+        sys.exit(1)
 
     if args.action in ["all", "repair"]:
         repair_incomplete_animes(mode=args.mode)
