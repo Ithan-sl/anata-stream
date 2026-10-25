@@ -23,7 +23,10 @@ import subprocess
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
-from bs4 import BeautifulSoup
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    BeautifulSoup = None
 import socket
 import indexer
 
@@ -590,20 +593,35 @@ def harvest_anime(anime_url: str, anime_title: str, mode: str = "direct", strict
         return False
 
     # Extrai o título canônico da tag <h1> da página específica
-    page_soup = BeautifulSoup(html, "html.parser")
-    h1_tag = page_soup.find("h1")
-    if h1_tag and h1_tag.get_text(strip=True):
-        canonical_title = h1_tag.get_text(strip=True)
-        canonical_title = (
-            canonical_title.replace("&acute;", "´")
-            .replace("&ccedil;", "ç")
-            .replace("&atilde;", "ã")
-            .replace("&eacute;", "é")
-            .replace("&ocirc;", "ô")
-            .strip()
-        )
-        if canonical_title:
-            anime_title = canonical_title
+    if BeautifulSoup:
+        page_soup = BeautifulSoup(html, "html.parser")
+        h1_tag = page_soup.find("h1")
+        if h1_tag and h1_tag.get_text(strip=True):
+            canonical_title = h1_tag.get_text(strip=True)
+            canonical_title = (
+                canonical_title.replace("&acute;", "´")
+                .replace("&ccedil;", "ç")
+                .replace("&atilde;", "ã")
+                .replace("&eacute;", "é")
+                .replace("&ocirc;", "ô")
+                .strip()
+            )
+            if canonical_title:
+                anime_title = canonical_title
+    else:
+        m_h1 = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.DOTALL | re.IGNORECASE)
+        if m_h1:
+            raw_h1 = re.sub(r'<[^>]+>', '', m_h1.group(1)).strip()
+            canonical_title = (
+                raw_h1.replace("&acute;", "´")
+                .replace("&ccedil;", "ç")
+                .replace("&atilde;", "ã")
+                .replace("&eacute;", "é")
+                .replace("&ocirc;", "ô")
+                .strip()
+            )
+            if canonical_title:
+                anime_title = canonical_title
 
     print(f"\n================================================================")
     print(f"🎬 [PROCESSANDO] {anime_title}")
@@ -753,36 +771,61 @@ def crawl_section(section_name: str, start_page: int = 1, max_pages: int = 3, mo
             print(f"[-] Falha ao obter conteúdo da página {page}. Pulando...")
             continue
 
-        # Extração limpa dos cards via BeautifulSoup para evitar captura de headers da página
-        soup = BeautifulSoup(html, "html.parser")
+        # Extração limpa dos cards via BeautifulSoup ou fallback granular por article
         items = []
+        if BeautifulSoup:
+            soup = BeautifulSoup(html, "html.parser")
+            for art in soup.select("article.item, .items article"):
+                a_tag = art.find("a", href=True)
+                if not a_tag:
+                    continue
+                href = a_tag["href"]
+                if not ("/anime/" in href or "/filme/" in href):
+                    continue
+                
+                t_tag = art.select_one(".data h3, .data .title, h3, .title")
+                title = t_tag.get_text(strip=True) if t_tag else (a_tag.get("title") or "")
+                if not title:
+                    img = art.find("img", alt=True)
+                    title = img["alt"] if img else ""
 
-        for art in soup.select("article.item, .items article"):
-            a_tag = art.find("a", href=True)
-            if not a_tag:
-                continue
-            href = a_tag["href"]
-            if not ("/anime/" in href or "/filme/" in href):
-                continue
-            
-            t_tag = art.select_one(".data h3, .data .title, h3, .title")
-            title = t_tag.get_text(strip=True) if t_tag else (a_tag.get("title") or "")
-            if not title:
-                img = art.find("img", alt=True)
-                title = img["alt"] if img else ""
+                clean_title = (
+                    title.replace("&acute;", "´")
+                    .replace("&ccedil;", "ç")
+                    .replace("&atilde;", "ã")
+                    .replace("&eacute;", "é")
+                    .replace("&ocirc;", "ô")
+                    .strip()
+                )
 
-            clean_title = (
-                title.replace("&acute;", "´")
-                .replace("&ccedil;", "ç")
-                .replace("&atilde;", "ã")
-                .replace("&eacute;", "é")
-                .replace("&ocirc;", "ô")
-                .strip()
-            )
-
-            full_href = href if href.startswith("http") else f"{BASE_URL}{href}"
-            if clean_title and not any(full_href == it[0] for it in items):
-                items.append((full_href, clean_title))
+                full_href = href if href.startswith("http") else f"{BASE_URL}{href}"
+                if clean_title and not any(full_href == it[0] for it in items):
+                    items.append((full_href, clean_title))
+        else:
+            for art_block in re.findall(r'<article[^>]*>.*?</article>', html, re.DOTALL | re.IGNORECASE):
+                m_href = re.search(r'href=["\']([^"\']*(?:/anime/|/filme/)[^"\']*)["\']', art_block)
+                if not m_href:
+                    continue
+                href = m_href.group(1)
+                m_title = (
+                    re.search(r'<(?:h3|span)[^>]*class=["\'][^"\']*(?:title|data)[^"\']*["\'][^>]*>(.*?)</(?:h3|span)>', art_block, re.DOTALL | re.IGNORECASE)
+                    or re.search(r'<h3[^>]*>(.*?)</h3>', art_block, re.DOTALL | re.IGNORECASE)
+                    or re.search(r'title=["\']([^"\']+)["\']', art_block)
+                    or re.search(r'alt=["\']([^"\']+)["\']', art_block)
+                )
+                if m_title:
+                    raw_title = re.sub(r'<[^>]+>', '', m_title.group(1)).strip()
+                    clean_title = (
+                        raw_title.replace("&acute;", "´")
+                        .replace("&ccedil;", "ç")
+                        .replace("&atilde;", "ã")
+                        .replace("&eacute;", "é")
+                        .replace("&ocirc;", "ô")
+                        .strip()
+                    )
+                    full_href = href if href.startswith("http") else f"{BASE_URL}{href}"
+                    if clean_title and not any(full_href == it[0] for it in items):
+                        items.append((full_href, clean_title))
 
         if not items:
             print(f"[-] Nenhum título encontrado na página {page}.")
